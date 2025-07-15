@@ -388,3 +388,9 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None):
     except Exception as e:
         # Return 0 reward for any unexpected errors
         return 0.0
+    
+def pass_unit_test_reward(oracle_patches: list[str], pred_patches: list[str]) -> bool:
+    """
+    Check it the patches pass the unit test.
+    """
+    pass
