@@ -29,5 +29,4 @@ data = {
 response = requests.post(url, files=files, data=data)
 print(response.json())
 
-
 ```
