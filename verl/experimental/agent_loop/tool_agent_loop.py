@@ -15,14 +15,14 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, List, Optional
 from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.profiler import simple_timer
-from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.rollout_trace import rollout_trace_op, RolloutTraceConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -54,6 +54,154 @@ class ToolAgentLoop(AgentLoopBase):
         cls.prompt_length = config.actor_rollout_ref.rollout.prompt_length
         cls.response_length = config.actor_rollout_ref.rollout.response_length
         cls.system_prompt = tokenizer.apply_chat_template([{}], add_generation_prompt=False, tokenize=True)
+
+        # Initialize scorers from config if available
+        cls._init_scorers_from_config(config)
+
+    @classmethod
+    def _init_scorers_from_config(cls, config):
+        """Initialize scorers from configuration."""
+        try:
+            # Check if trace config exists and scorers are enabled
+            trace_config = config.actor_rollout_ref.rollout.get("trace", {})
+            scorer_config = trace_config.get("scorers", {})
+            
+            if not scorer_config.get("enabled", False):
+                logger.info("Scorer functionality is disabled in config")
+                return
+            
+            # Load scorers from config
+            scorers = cls._load_scorers_from_config(scorer_config)
+            print(f"scorers: {scorers}")
+            if scorers:
+                print("Scorers loaded")
+                # Initialize RolloutTraceConfig with scorers
+                trainer_config = config.get("trainer", {})
+                RolloutTraceConfig.init(
+                    project_name=trainer_config.get("project_name", "tool_agent_project"),
+                    experiment_name=trainer_config.get("experiment_name", "tool_agent_experiment"),
+                    backend=trace_config.get("backend"),
+                    token2text=trace_config.get("token2text", False),
+                    scorers=scorers
+                )
+                logger.info(f"Initialized {len(scorers)} scorers for ToolAgentLoop")
+            
+        except Exception as e:
+            logger.warning(f"Failed to initialize scorers from config: {e}")
+
+    @classmethod
+    def _load_scorers_from_config(cls, scorer_config):
+        """Load scorers from configuration."""
+        scorers = []
+        scorer_list = scorer_config.get("scorer_list", {})
+        
+        print(f"Raw scorer_list: {scorer_list}")
+        print(f"Type of scorer_list: {type(scorer_list)}")
+        
+        if hasattr(scorer_list, 'keys') and hasattr(scorer_list, 'values'):
+            try:
+                sorted_keys = sorted(scorer_list.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
+                scorer_list = [scorer_list[key] for key in sorted_keys]
+                print(f"Converted dict to list: {scorer_list}")
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Could not sort keys numerically: {e}")
+                scorer_list = list(scorer_list.values())
+                print(f"Using values directly: {scorer_list}")
+        
+        if not isinstance(scorer_list, list):
+            print(f"Warning: scorer_list is not a list after conversion: {type(scorer_list)}")
+            scorer_list = []
+
+        for i, scorer_item in enumerate(scorer_list):
+            print(f"Processing scorer {i}: {scorer_item}")
+            try:
+                scorer = cls._create_scorer_from_config(scorer_item)
+                if scorer:
+                    scorers.append(scorer)
+                    logger.info(f"Loaded scorer: {scorer}")
+                    print(f"Successfully loaded scorer: {scorer}")
+                else:
+                    print(f"Scorer {i} was not enabled or failed to create")
+            except Exception as e:
+                logger.error(f"Failed to load scorer {scorer_item.get('name', 'unknown')}: {e}")
+                print(f"Error loading scorer {i}: {e}")
+        
+        print(f"Total scorers loaded: {len(scorers)}")
+        return scorers
+
+    @classmethod
+    def _create_scorer_from_config(cls, scorer_config):
+        """Create a scorer instance from configuration."""
+        print(f"Creating scorer from config: {scorer_config}")
+        
+        scorer_type = scorer_config.get("type")
+        name = scorer_config.get("name", scorer_type)
+        enabled = scorer_config.get("enabled", False)
+        
+        print(f"Scorer type: {scorer_type}, name: {name}, enabled: {enabled}")
+        
+        if not enabled:
+            print(f"Scorer {name} is disabled, skipping")
+            return None
+        
+        if scorer_type == "custom":
+            return cls._load_custom_scorer(scorer_config)
+        elif scorer_type == "factual_accuracy":
+            from verl.experimental.scores.scorer_examples import FactualAccuracyScorer
+            print("Creating FactualAccuracyScorer")
+            return FactualAccuracyScorer()
+        elif scorer_type == "response_length":
+            from verl.experimental.scores.scorer_examples import ResponseLengthScorer
+            min_length = scorer_config.get("min_length", 10)
+            max_length = scorer_config.get("max_length", 1000)
+            print(f"Creating ResponseLengthScorer with min_length: {min_length}, max_length: {max_length}")
+            return ResponseLengthScorer(min_length=min_length, max_length=max_length)
+        elif scorer_type == "math_accuracy":
+            from verl.experimental.scores.scorer_examples import MathAccuracyScorer
+            print("Creating MathAccuracyScorer")
+            return MathAccuracyScorer()
+        elif scorer_type == "rewardhacking":
+            from verl.experimental.scores.scorer_examples import RewardHackingScorer
+            model = scorer_config.get("model", "gpt-4o-mini")
+            print(f"Creating RewardHackingScorer with model: {model}")
+            return RewardHackingScorer(model=model)
+        else:
+            logger.warning(f"Unknown scorer type: {scorer_type}")
+            print(f"Unknown scorer type: {scorer_type}")
+            return None
+
+    @classmethod
+    def _load_custom_scorer(cls, scorer_config):
+        """Load a custom scorer from class path."""
+        try:
+            import importlib
+            class_path = scorer_config.get("class_path")
+            if not class_path:
+                logger.error("Custom scorer must specify class_path")
+                return None
+            
+            # Dynamic import
+            module_path, class_name = class_path.rsplit(".", 1)
+            module = importlib.import_module(module_path)
+            scorer_class = getattr(module, class_name)
+            
+            # Create instance
+            kwargs = {k: v for k, v in scorer_config.items() 
+                     if k not in ["type", "name", "enabled", "class_path"]}
+            return scorer_class(**kwargs)
+            
+        except Exception as e:
+            logger.error(f"Failed to load custom scorer: {e}")
+            return None
+
+    @classmethod
+    def add_scorer(cls, scorer):
+        """Add a scorer to the current configuration."""
+        try:
+            RolloutTraceConfig.add_scorer(scorer)
+            logger.info(f"Added scorer: {scorer}")
+        except Exception as e:
+            logger.error(f"Failed to add scorer: {e}")
 
     @rollout_trace_op
     async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any]) -> AgentLoopOutput:

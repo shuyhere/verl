@@ -17,7 +17,7 @@ import contextlib
 import functools
 import inspect
 import os
-from typing import Optional
+from typing import Optional, List, Any
 
 
 class RolloutTraceConfig:
@@ -32,6 +32,7 @@ class RolloutTraceConfig:
         token2text (bool): Whether to convert tokens to text in traces. Defaults to False.
         project_name (str): Name of the project for tracing.
         experiment_name (str): Name of the experiment for tracing.
+        scorers (List[Any]): List of scorers to apply to traces.
     """
 
     _instance: Optional["RolloutTraceConfig"] = None
@@ -41,6 +42,7 @@ class RolloutTraceConfig:
     _initialized: bool = False
     project_name: str = None
     experiment_name: str = None
+    scorers: List[Any] = []
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -55,15 +57,21 @@ class RolloutTraceConfig:
         return cls._instance
 
     @classmethod
-    def init(cls, project_name: str, experiment_name: str, backend: str, token2text: bool = False):
+    def init(cls, project_name: str, experiment_name: str, backend: str, token2text: bool = False, scorers: List[Any] = None):
         config = cls.get_instance()
+        
+        # 如果已经初始化，只更新 scorers（如果提供了的话）
         if config._initialized:
+            if scorers is not None:
+                config.scorers = scorers
+                print(f"Updated scorers in existing config: {len(scorers)} scorers")
             return
 
         config.backend = backend
         config.token2text = token2text
         config.project_name = project_name
         config.experiment_name = experiment_name
+        config.scorers = scorers or []
 
         if backend == "weave":
             import weave
@@ -95,6 +103,18 @@ class RolloutTraceConfig:
     @classmethod
     def enable_token2text(cls) -> Optional[bool]:
         return cls.get_instance().token2text
+
+    @classmethod
+    def get_scorers(cls) -> List[Any]:
+        scorers = cls.get_instance().scorers
+        print(f"RolloutTraceConfig.get_scorers() called, returning {len(scorers)} scorers: {scorers}")
+        return scorers
+
+    @classmethod
+    def add_scorer(cls, scorer: Any):
+        """Add a scorer to the configuration."""
+        config = cls.get_instance()
+        config.scorers.append(scorer)
 
     @classmethod
     def reset(cls):
@@ -167,11 +187,59 @@ def rollout_trace_attr(sample_index=None, step=None, rollout_n=None, name="rollo
         yield
 
 
+async def apply_scorers_to_call(call, result, scorers, instance=None):
+    """Apply scorers to a weave call."""
+    if not scorers:
+        print("No scorers to apply")
+        return
+    
+    try:
+        for scorer in scorers:
+            print(f"Applying scorer {scorer.__class__.__name__}")
+            
+            # 尝试从 result 中提取文本
+            prompt_text = ""
+            response_text = ""
+            
+            if hasattr(result, 'prompt_ids') and hasattr(result, 'response_ids'):
+                # 如果有 tokenizer，解码 tokens
+                try:
+                    if instance and hasattr(instance, 'tokenizer') and hasattr(instance.tokenizer, 'decode'):
+                        loop = asyncio.get_running_loop()
+                        prompt_text = await loop.run_in_executor(None, instance.tokenizer.decode, result.prompt_ids)
+                        response_text = await loop.run_in_executor(None, instance.tokenizer.decode, result.response_ids)
+                    else:
+                        prompt_text = "prompt_text"  # 占位符
+                        response_text = "response_text"  # 占位符
+                except Exception as decode_error:
+                    print(f"Error decoding tokens: {decode_error}")
+                    prompt_text = "prompt_text"  # 占位符
+                    response_text = "response_text"  # 占位符
+            
+            # 直接调用 scorer 的 score 方法
+            try:
+                score_result = await scorer.score(response_text, prompt_text)
+                print(f"Scorer {scorer.__class__.__name__} result: {score_result}")
+                
+                # 将结果添加到 call 的属性中
+                if hasattr(call, 'add_attribute'):
+                    call.add_attribute(f"scorer_{scorer.name}", score_result)
+                
+            except Exception as scorer_error:
+                print(f"Error calling scorer {scorer.__class__.__name__}: {scorer_error}")
+                
+    except Exception as e:
+        # Log error but don't fail the main operation
+        print(f"Warning: Failed to apply scorer {scorer.__class__.__name__}: {e}")
+
+
 def rollout_trace_op(func):
     @functools.wraps(func)
     async def async_wrapper(self, *args, **kwargs):
         backend = RolloutTraceConfig.get_backend()
         enable_token2text = RolloutTraceConfig.enable_token2text()
+        scorers = RolloutTraceConfig.get_scorers()
+        print(f"use scorers: {scorers}")
         if backend is None:
             return await func(self, *args, **kwargs)
 
@@ -203,12 +271,17 @@ def rollout_trace_op(func):
             call = tracer.create_call(op=func.__qualname__, inputs=inputs, attributes=cur_attributes)
             try:
                 result = await func(self, *args, **kwargs)
-
                 if enable_token2text:
                     _result = await add_token2text(self, result)
                     tracer.finish_call(call, output=_result)
                 else:
                     tracer.finish_call(call, output=result)
+
+                # Apply scorers after finishing the call
+                if scorers:
+                    print(f"Applying scorers: {scorers}")
+                    # 传递 self 以便访问 tokenizer
+                    await apply_scorers_to_call(call, result, scorers, self)
 
                 return result
 
@@ -235,6 +308,8 @@ def rollout_trace_op(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
         backend = RolloutTraceConfig.get_backend()
+        scorers = RolloutTraceConfig.get_scorers()
+        
         if backend is None:
             return func(self, *args, **kwargs)
 
@@ -253,6 +328,10 @@ def rollout_trace_op(func):
             try:
                 result = func(self, *args, **kwargs)
                 tracer.finish_call(call, output=result)
+                
+                # Apply scorers after finishing the call
+                asyncio.create_task(apply_scorers_to_call(call, result, scorers))
+                
                 return result
             except Exception as e:
                 tracer.finish_call(call, exception=e)
