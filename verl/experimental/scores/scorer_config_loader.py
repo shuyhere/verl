@@ -13,9 +13,7 @@
 # limitations under the License.
 
 """
-Scorer 配置加载器
-
-这个模块提供了从配置文件加载和初始化 scorer 的功能。
+scorer config loader
 """
 
 import importlib
@@ -25,26 +23,29 @@ from typing import Any, Dict, List, Optional
 from verl.utils.rollout_trace import RolloutTraceConfig
 from verl.experimental.scores.scorer_examples import (
     HallucinationScorer,
+    SelfAwarenessScorer,
     FactualAccuracyScorer, 
     ResponseLengthScorer,
-    create_custom_scorer
+    RewardHackingScorer,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class ScorerConfigLoader:
-    """Scorer 配置加载器类。"""
+    """scorer config loader class"""
     
     def __init__(self):
         self.available_scorers = {
             "hallucination": HallucinationScorer,
             "factual_accuracy": FactualAccuracyScorer,
             "response_length": ResponseLengthScorer,
+            "self_awareness": SelfAwarenessScorer,
+            "reward_hacking": RewardHackingScorer,
         }
     
     def load_scorer_from_config(self, scorer_config: Dict[str, Any]) -> Optional[Any]:
-        """从配置字典加载单个 scorer。"""
+        """load single scorer from config dict"""
         try:
             scorer_type = scorer_config.get("type")
             name = scorer_config.get("name", scorer_type)
@@ -58,7 +59,7 @@ class ScorerConfigLoader:
                 return self._load_custom_scorer(scorer_config)
             elif scorer_type in self.available_scorers:
                 scorer_class = self.available_scorers[scorer_type]
-                # 移除已知参数，其余作为 kwargs
+                # remove known parameters, the rest as kwargs
                 kwargs = {k: v for k, v in scorer_config.items() 
                          if k not in ["type", "name", "enabled"]}
                 return scorer_class(**kwargs)
@@ -71,19 +72,19 @@ class ScorerConfigLoader:
             return None
     
     def _load_custom_scorer(self, scorer_config: Dict[str, Any]) -> Optional[Any]:
-        """加载自定义 scorer。"""
+        """load custom scorer"""
         try:
             class_path = scorer_config.get("class_path")
             if not class_path:
                 logger.error("Custom scorer must specify class_path")
                 return None
             
-            # 动态导入类
+            # dynamic import class
             module_path, class_name = class_path.rsplit(".", 1)
             module = importlib.import_module(module_path)
             scorer_class = getattr(module, class_name)
             
-            # 创建实例
+            # create instance
             kwargs = {k: v for k, v in scorer_config.items() 
                      if k not in ["type", "name", "enabled", "class_path"]}
             return scorer_class(**kwargs)
@@ -93,10 +94,10 @@ class ScorerConfigLoader:
             return None
     
     def load_scorers_from_config(self, config: Dict[str, Any]) -> List[Any]:
-        """从完整配置加载所有 scorer。"""
+        """load all scorers from config"""
         scorers = []
         
-        # 检查是否启用了 scorer 功能
+        # check if scorer is enabled
         trace_config = config.get("actor_rollout_ref", {}).get("rollout", {}).get("trace", {})
         scorer_config = trace_config.get("scorers", {})
         
@@ -115,18 +116,18 @@ class ScorerConfigLoader:
         return scorers
     
     def setup_scorers_from_config(self, config: Dict[str, Any]) -> None:
-        """从配置设置 scorer 并初始化 RolloutTraceConfig。"""
+        """setup scorers from config and initialize RolloutTraceConfig"""
         scorers = self.load_scorers_from_config(config)
         
         if not scorers:
             logger.info("No scorers loaded from config")
             return
         
-        # 获取 trace 配置
+        # get trace config
         trace_config = config.get("actor_rollout_ref", {}).get("rollout", {}).get("trace", {})
         trainer_config = config.get("trainer", {})
         
-        # 初始化 RolloutTraceConfig
+        # initialize RolloutTraceConfig
         RolloutTraceConfig.init(
             project_name=trainer_config.get("project_name", "default_project"),
             experiment_name=trainer_config.get("experiment_name", "default_experiment"),
@@ -139,7 +140,7 @@ class ScorerConfigLoader:
 
 
 def setup_scorers_from_yaml_config(config_path: str) -> None:
-    """从 YAML 配置文件设置 scorer。"""
+    """setup scorers from yaml config"""
     try:
         import yaml
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -153,7 +154,7 @@ def setup_scorers_from_yaml_config(config_path: str) -> None:
 
 
 def add_scorer_to_existing_config(scorer_config: Dict[str, Any]) -> None:
-    """向现有的 RolloutTraceConfig 添加 scorer。"""
+    """add scorer to existing RolloutTraceConfig"""
     loader = ScorerConfigLoader()
     scorer = loader.load_scorer_from_config(scorer_config)
     
@@ -164,9 +165,9 @@ def add_scorer_to_existing_config(scorer_config: Dict[str, Any]) -> None:
         logger.warning(f"Failed to add scorer from config: {scorer_config}")
 
 
-# 便捷函数
+        # quick setup scorers
 def quick_setup_scorers(scorer_types: List[str], **kwargs) -> None:
-    """快速设置常用 scorer。"""
+    """quick setup scorers"""
     scorers = []
     
     for scorer_type in scorer_types:

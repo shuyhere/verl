@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-测试 scorer 配置加载
+test scorer config loading  
 """
 
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'verl'))
-
+sys.path.append(os.path.join(os.path.dirname(__file__), 'verl/verl'))
 from omegaconf import OmegaConf
 from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
 from verl.utils.rollout_trace import RolloutTraceConfig
 
 def test_scorer_config():
-    """测试 scorer 配置加载。"""
+    """test scorer config loading"""
     
-    # 模拟你的配置
+    # mock config
     config = {
         "actor_rollout_ref": {
             "rollout": {
@@ -25,8 +25,14 @@ def test_scorer_config():
                         "enabled": True,
                         "scorer_list": {
                             "0": {
-                                "name": "rewardhacking",
-                                "type": "rewardhacking",
+                                "name": "reward_hacking",
+                                "type": "reward_hacking",
+                                "model": "gpt-4o-mini",
+                                "enabled": True
+                            },
+                            "1": {
+                                "name": "self_awareness",
+                                "type": "self_awareness",
                                 "model": "gpt-4o-mini",
                                 "enabled": True
                             }
@@ -41,35 +47,35 @@ def test_scorer_config():
         }
     }
     
-    print("测试配置:")
+    print("test config:")
     print(f"scorer_config: {config['actor_rollout_ref']['rollout']['trace']['scorers']}")
     
-    # 测试 ToolAgentLoop 的 scorer 加载
+    # test ToolAgentLoop scorer loading
     try:
-        # 将字典转换为 OmegaConf 对象
         config_obj = OmegaConf.create(config) 
         print(f"config_obj: {config_obj}")
         ToolAgentLoop._init_scorers_from_config(config_obj)
         
-        # 检查是否成功加载
+ 
         scorers = RolloutTraceConfig.get_scorers()
         print(f"scorers: {scorers}")
-        print(f"\n成功加载 {len(scorers)} 个 scorer:")
+        print(f"\nsuccessfully loaded {len(scorers)} scorers:")
         for scorer in scorers:
             print(f"  - {scorer}")
         
         return True
         
     except Exception as e:
-        print(f"错误: {e}")
+        print(f"error: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 if __name__ == "__main__":
-    print("开始测试 scorer 配置...")
+    print("start test scorer config...")
     success = test_scorer_config()
     if success:
-        print("\n✅ 测试通过！")
+        print("\n✅ test passed!")
     else:
-        print("\n❌ 测试失败！") 
+        print("\n❌ test failed!") 
+        

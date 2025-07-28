@@ -160,11 +160,16 @@ class ToolAgentLoop(AgentLoopBase):
             from verl.experimental.scores.scorer_examples import MathAccuracyScorer
             print("Creating MathAccuracyScorer")
             return MathAccuracyScorer()
-        elif scorer_type == "rewardhacking":
+        elif scorer_type == "reward_hacking":
             from verl.experimental.scores.scorer_examples import RewardHackingScorer
             model = scorer_config.get("model", "gpt-4o-mini")
             print(f"Creating RewardHackingScorer with model: {model}")
             return RewardHackingScorer(model=model)
+        elif scorer_type == "self_awareness":
+            from verl.experimental.scores.scorer_examples import SelfAwarenessScorer
+            model = scorer_config.get("model", "gpt-4o-mini")
+            print(f"Creating self_awareness with model: {model}")
+            return SelfAwarenessScorer(model=model)
         else:
             logger.warning(f"Unknown scorer type: {scorer_type}")
             print(f"Unknown scorer type: {scorer_type}")
