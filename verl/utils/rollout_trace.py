@@ -108,11 +108,41 @@ def rollout_trace_attr(sample_index=None, step=None, rollout_n=None, name="rollo
     attributes = {}
     if backend:
         if sample_index is not None:
-            attributes["sample_index"] = int(sample_index)
+            # Handle different types of sample_index (int, str, numpy.int64, etc.)
+            if hasattr(sample_index, 'item'):  # numpy types
+                attributes["sample_index"] = sample_index.item()
+            elif isinstance(sample_index, str):
+                # Try to convert string to int if possible, otherwise keep as string
+                try:
+                    attributes["sample_index"] = int(sample_index)
+                except (ValueError, TypeError):
+                    attributes["sample_index"] = sample_index
+            else:
+                attributes["sample_index"] = sample_index
         if step is not None:
-            attributes["step"] = step
+            # Handle different types of step (int, str, numpy.int64, etc.)
+            if hasattr(step, 'item'):  # numpy types
+                attributes["step"] = step.item()
+            elif isinstance(step, str):
+                # Try to convert string to int if possible, otherwise keep as string
+                try:
+                    attributes["step"] = int(step)
+                except (ValueError, TypeError):
+                    attributes["step"] = step
+            else:
+                attributes["step"] = step
         if rollout_n is not None:
-            attributes["rollout_n"] = rollout_n
+            # Handle different types of rollout_n (int, str, numpy.int64, etc.)
+            if hasattr(rollout_n, 'item'):  # numpy types
+                attributes["rollout_n"] = rollout_n.item()
+            elif isinstance(rollout_n, str):
+                # Try to convert string to int if possible, otherwise keep as string
+                try:
+                    attributes["rollout_n"] = int(rollout_n)
+                except (ValueError, TypeError):
+                    attributes["rollout_n"] = rollout_n
+            else:
+                attributes["rollout_n"] = rollout_n
         attributes["validate"] = validate
         attributes["experiment_name"] = RolloutTraceConfig.get_instance().experiment_name
 

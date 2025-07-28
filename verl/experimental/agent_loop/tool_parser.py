@@ -83,6 +83,32 @@ class HermesToolParser(ToolParser):
         self.tool_call_end_token: str = "</tool_call>"
         self.tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
+    def _clean_json_string(self, json_str: str) -> str:
+        """Clean JSON string to handle common issues like control characters and escape problems."""
+        if not json_str:
+            return json_str
+        
+        # Remove or replace control characters (except newlines and tabs in strings)
+        import string
+        control_chars = ''.join(map(chr, list(range(0, 9)) + list(range(11, 13)) + list(range(14, 32))))
+        json_str = json_str.translate(str.maketrans(control_chars, ' ' * len(control_chars)))
+        
+        # Fix common escape issues
+        # Replace unescaped quotes that might cause issues
+        json_str = re.sub(r'(?<!\\)"', '"', json_str)
+        
+        # Fix common escape sequences
+        json_str = json_str.replace('\\"', '"')  # Fix double-escaped quotes
+        json_str = json_str.replace('\\\\', '\\')  # Fix double-escaped backslashes
+        
+        # Remove trailing commas in objects and arrays
+        json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+        
+        # Clean up whitespace
+        json_str = json_str.strip()
+        
+        return json_str
+
     @rollout_trace_op
     async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
         loop = asyncio.get_running_loop()
@@ -94,11 +120,15 @@ class HermesToolParser(ToolParser):
         function_calls = []
         for match in matches:
             try:
-                function_call = json.loads(match)
+                # Clean the match string to handle control characters and escape issues
+                cleaned_match = self._clean_json_string(match)
+                function_call = json.loads(cleaned_match)
                 name, arguments = function_call["name"], function_call["arguments"]
                 function_calls.append(FunctionCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
             except Exception as e:
                 logger.error(f"Failed to decode tool call: {e}")
+                # Log the problematic match for debugging
+                logger.debug(f"Problematic match: {repr(match)}")
 
         # remaing text exclude tool call tokens
         content = self.tool_call_regex.sub("", text)

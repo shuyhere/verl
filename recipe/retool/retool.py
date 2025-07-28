@@ -31,12 +31,59 @@ class CustomSandboxFusionTool(SandboxFusionTool):
         super().__init__(config, tool_schema)
         self.code_pattern = re.compile(r"```python(.*?)```", re.DOTALL)
 
+    def _preprocess_code(self, code: str) -> str:
+        """Preprocess code to fix common syntax errors."""
+        if not code:
+            return code
+            
+        # Fix common syntax errors
+        lines = code.split("\n")
+        processed_lines = []
+        
+        for line in lines:
+            # Fix assignment in print statements
+            if "print(" in line and "=" in line:
+                # Extract the problematic part
+                print_start = line.find("print(")
+                print_end = line.rfind(")")
+                if print_start != -1 and print_end != -1:
+                    content = line[print_start+6:print_end]
+                    if "=" in content:
+                        # Split by = and fix
+                        parts = content.split("=", 1)
+                        if len(parts) == 2:
+                            var_name = parts[0].strip()
+                            value = parts[1].strip()
+                            # Replace with proper assignment and print
+                            line = f"{var_name} = {value}\nprint({var_name})"
+            
+            # Fix ^ to ** for exponentiation
+            line = re.sub(r'(\w+)\^(\w+)', r'\1**\2', line)
+            
+            # Fix function calls with = in arguments
+            if "=" in line and "(" in line and ")" in line:
+                # Try to fix expressions like squared(200) + squared(240) = 40000 + 57600 = 97600
+                if "=" in line and line.count("=") > 1:
+                    # Split by last = and fix
+                    parts = line.rsplit("=", 1)
+                    if len(parts) == 2:
+                        expression = parts[0].strip()
+                        result = parts[1].strip()
+                        line = f"result = {expression}\nprint(result)"
+            
+            processed_lines.append(line)
+        
+        return "\n".join(processed_lines)
+
     @rollout_trace_op
     async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[str, float, dict]:
         code = parameters["code"]
         matches = self.code_pattern.findall(code)
         if matches:
             code = matches[0].strip()
+
+        # Preprocess code to fix common syntax errors
+        code = self._preprocess_code(code)
 
         # NOTE: some script may not explicitly print result, we need to add a print statement to the end of the script
         lines = code.split("\n")
@@ -53,9 +100,14 @@ class CustomSandboxFusionTool(SandboxFusionTool):
         if not isinstance(code, str):
             code = str(code)
 
-        result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
-        # sandbox has no score or metrics, use Nones
-        return result, None, None
+        try:
+            result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
+            # sandbox has no score or metrics, use Nones
+            return result, None, None
+        except Exception as e:
+            logger.error(f"Code execution failed for instance {instance_id}: {e}")
+            logger.debug(f"Failed code: {code}")
+            return f"Code execution failed: {e}", None, {"error": str(e)}
 
 
 answer_format = """\nThe answer format must be: \\boxed{'The final answer goes here.'}"""
