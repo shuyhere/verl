@@ -95,6 +95,24 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
                     if first_line.strip().isalpha():
                         code = rest
         
+        # 如果没有找到代码块，直接寻找 def 和 return 来定位代码
+        if "def " in code:
+            def_match = re.search(r'def\s+\w+\s*\([^)]*\)[^:]*:', code, re.DOTALL)
+            if def_match:
+                # 找到 def 的位置
+                def_start = def_match.start()
+                # 寻找最后一个 return 语句
+                return_matches = list(re.finditer(r'return\s+[^\\n]+', code, re.DOTALL))
+                if return_matches:
+                    # 取最后一个 return 的位置
+                    last_return = return_matches[-1]
+                    return_end = last_return.end()
+                    # 提取从 def 开始到最后一个 return 结束的代码
+                    code = code[def_start:return_end].strip()
+                else:
+                    # 如果没有找到 return，从 def 开始到代码结束
+                    code = code[def_start:].strip()
+        
         if "def " in code:
             function_match = re.search(r'def\s+(\w+)\s*\(', code)
             if function_match:
@@ -108,7 +126,10 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
 
 input_str = sys.stdin.read().strip()
 result = {function_name}(input_str)
-print(result)
+if isinstance(result, list):
+    print("\\n".join(result) + "\\n")
+else:
+    print(result)
 """
             return complete_code
         else:
@@ -160,11 +181,6 @@ print(result)
         test_cases = self.instance_test_cases.get(instance_id, [])
         #test case format: {'inputs': ['3 4\n1 2 3\n4 5 6\n1 1 1\n0 1 2 3', '5 5\n3 4 6 8 4\n8 3 4 9 3\n10 20 30 40 50\n5 55 13 1000 113', '1 1\n3\n4\n5\n0'], 'outputs': ['2 3 3 3', '2 7 3 7 7', '7']}
         
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"SandboxFusionTestCaseTool.execute called with instance_id: {instance_id}")
-            logger.debug(f"Retrieved test_cases for instance_id {instance_id}: {len(test_cases)} cases")
-            logger.debug(f"All instance_test_cases keys: {list(self.instance_test_cases.keys())}")
-            
         if not test_cases:
             metadata = {
                 "output": run_result,
@@ -183,7 +199,7 @@ print(result)
             if not ("```python" in processed_code or "```" in processed_code):
                 formatted_code = f"```python\n{processed_code}\n```"
             
-            test_case_result = sandbox_fusion.compute_score(
+            _, metadata_list = sandbox_fusion.compute_score(
                 sandbox_fusion_url=self.sandbox_fusion_url,
                 concurrent_semaphore=None,
                 memory_limit_mb=self.memory_limit_mb,
@@ -192,50 +208,103 @@ print(result)
                 continuous=True
             )
             
-            score, metadata_list = test_case_result
+            total_samples = 0
+            for input_str in test_cases.get("inputs", []):
+                lines = input_str.strip().split('\n')
+                if lines and lines[0].isdigit():
+                    total_samples += int(lines[0])
             
+            passed_samples = 0
+            failed_samples = 0
             passed_tests = []
             failed_tests = []
+            failed_samples_details = []  # 存储失败的小样本详情
             
-            for meta in metadata_list:
+            for i, meta in enumerate(metadata_list):
                 if meta.get("status") == "success":
+                    input_str = test_cases.get("inputs", [])[meta.get("case_index", 0)]
+                    lines = input_str.strip().split('\n')
+                    if lines and lines[0].isdigit():
+                        test_cases_in_this_input = int(lines[0])
+                        passed_samples += test_cases_in_this_input
+                    
                     passed_tests.append({
                         "stdout": meta.get("stdout", ""),
                         "stderr": meta.get("stderr", ""),
                         "execution_time": meta.get("duration", 0.0)
                     })
                 else:
+                    input_str = test_cases.get("inputs", [])[meta.get("case_index", 0)]
+                    lines = input_str.strip().split('\n')
+                    if lines and lines[0].isdigit():
+                        test_cases_in_this_input = int(lines[0])
+                        failed_samples += test_cases_in_this_input
+                        
+                        # 添加失败的小样本详情（限制前5个）
+                        if len(failed_samples_details) < 5:
+                            failed_samples_details.append({
+                                "case_index": meta.get("case_index", 0),
+                                "input": input_str,
+                                "expected_output": test_cases.get("outputs", [])[meta.get("case_index", 0)],
+                                "actual_output": meta.get("stdout", ""),
+                                "stderr": meta.get("stderr", ""),
+                                "execution_time": meta.get("duration", 0.0),
+                                "status": meta.get("status", "unknown"),
+                                "error": meta.get("api_request_error", "Unknown error")
+                            })
+                    
                     failed_test_info = {
                         "status": meta.get("status", "unknown"),
                         "stdout": meta.get("stdout", ""),
                         "stderr": meta.get("stderr", ""),
                         "execution_time": meta.get("duration", 0.0),
-                        "error": meta.get("api_request_error", "Unknown error")
+                        "error": meta.get("api_request_error", "Unknown error"),
+                        "input": input_str,
+                        "expected_output": test_cases.get("outputs", [])[meta.get("case_index", 0)],
+                        "actual_output": meta.get("stdout", "")
                     }
                     failed_tests.append(failed_test_info)
+            
+            if total_samples > 0:
+                score = passed_samples / total_samples
+            else:
+                score = 0.0
             
             metadata = {
                 "score": score,
                 "raw_execution_output": run_result,
                 "execution_result": "computed_with_sandbox_fusion",
-                "total_tests": len(test_cases),
                 "passed_tests": len(passed_tests),
-                "passed_tests_details": passed_tests,
-                "failed_tests": failed_tests
+                "passed_samples": passed_samples,
+                "failed_tests": len(failed_tests),
+                "failed_samples": failed_samples,
+                "failed_samples_details": failed_samples_details,  # 前5个失败的小样本详情
             }
-            
-            # 格式化输出    
+
             output_lines = []
             output_lines.append(f"Output:")
             output_lines.append(run_result)
             output_lines.append(f"\nTest Case Evaluation:")
             output_lines.append(f"Score: {score:.3f}")
-            output_lines.append(f"Tests Passed: {metadata['passed_tests']}/{metadata['total_tests']}")
+            output_lines.append(f"Tests Passed: {passed_samples}/{total_samples}")
             
-            if metadata['failed_tests']:
-                output_lines.append(f"\nFailed Tests:")
-                for i, failed_test in enumerate(metadata['failed_tests']):
-                    output_lines.append(f"  Test {i+1}: {failed_test.get('error', 'Unknown error')}")
+            if failed_samples_details:
+                output_lines.append(f"\nFailed Samples:")
+                for i, detail in enumerate(failed_samples_details[:2]): 
+                    output_lines.append(f"  Sample {i+1}:")
+                    input_str = detail.get('input', '')
+                    lines = input_str.strip().split('\n')
+                    if lines and lines[0].isdigit():
+                        t = int(lines[0])
+                        output_lines.append(f"    Test cases: {t}")
+                        for j in range(1, min(t+1, 4)):
+                            if j < len(lines):
+                                output_lines.append(f"    Case {j}: {lines[j]}")
+                        if t > 3:
+                            output_lines.append(f"    ... and {t-3} more cases")
+                    output_lines.append(f"    Expected output: {detail.get('expected_output', 'N/A')}")
+                    output_lines.append(f"    Your output: {detail.get('actual_output', 'N/A')}")
+                    output_lines.append("")
             
             return "\n".join(output_lines), score, metadata
             
@@ -316,14 +385,15 @@ class CodeAgenticDataset(RLHFDataset):
         question = row.get("question", [""])[0] if isinstance(row.get("question"), list) else row.get("question", "")
         input_output = row.get("input_output", [""])[0] if isinstance(row.get("input_output"), list) else row.get("input_output", "")
         
-        prompt_content = f"""You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests.
+        prompt_content = f"""You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests. Note, you can only use the provided
+code_interpreter tool to execute your code.
 
 		### Code problem:
 		{question}
         
         Remember to put your answer on its own line after \"Answer:\".
 		"""
-        answer_format = """\nThe final code solution format must be a complete python function that can be executed with the input data provided and a return value."""
+        answer_format = """\nThe final code solution format must be a COMPLETE python FUNCTION which begins with "```python def" and ends with "return ... ```" that can be executed with the input data provided and a return value. AND THE CODE MUST BE INSIDE A ```python``` BLOCK."""
         if isinstance(input_output, str):
             try:
                 import json
@@ -371,59 +441,68 @@ class CodeAgenticDataset(RLHFDataset):
 
 
 def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, extra_info: dict) -> dict:
-    """
-    评估模型代码在测试集上的分数，自动提取代码块、函数名，兼容多种模型输出格式。
-    - solution_str: 模型原始输出（可能包含 markdown、注释、说明等）
-    - ground_truth: {"inputs": [...], "outputs": [...]}
-    - extra_info: 需包含 sandbox_fusion_url, memory_limit_mb, num_turns
-    返回: dict，包含 score、pred、passed_tests、failed_tests（无敏感信息）
-    """
-    
-    # 初始化默认值
+
     score = 0.0
     passed_tests = []
     failed_tests = []
     pred = "0/0"
     
     try:
-        # 1. 提取代码块（优先提取 ```python ... ``` 或 ``` ... ```，否则用全文）
         code = solution_str
+        
+        # 首先尝试提取 markdown 代码块
         code_block = None
-        # 优先找 ```python ... ```
         match = re.search(r"```python(.*?)(```|$)", code, re.DOTALL | re.IGNORECASE)
         if match:
             code_block = match.group(1).strip()
         else:
-            # 再找 ``` ... ```
             match = re.search(r"```(.*?)(```|$)", code, re.DOTALL)
             if match:
                 code_block = match.group(1).strip()
+        
         if code_block:
             code = code_block
         else:
-            # 没有代码块，直接用原文
-            code = code.strip()
-
-        # 2. 检测函数名
+            # 如果没有找到代码块，直接寻找 def 和 return 来定位代码
+            def_match = re.search(r'def\s+\w+\s*\([^)]*\)[^:]*:', code, re.DOTALL)
+            if def_match:
+                # 找到 def 的位置
+                def_start = def_match.start()
+                # 寻找最后一个 return 语句
+                return_matches = list(re.finditer(r'return\s+[^\\n]+', code, re.DOTALL))
+                if return_matches:
+                    # 取最后一个 return 的位置
+                    last_return = return_matches[-1]
+                    return_end = last_return.end()
+                    # 提取从 def 开始到最后一个 return 结束的代码
+                    code = code[def_start:return_end].strip()
+                else:
+                    # 如果没有找到 return，从 def 开始到代码结束
+                    code = code[def_start:].strip()
+            else:
+                # 如果连 def 都找不到，使用原始代码
+                code = code.strip()
+            
         function_match = re.search(r'def\s+(\w+)\s*\(', code)
         if function_match:
             function_name = function_match.group(1)
-            # 包装为可执行程序
             wrapped_code = f"""import sys
 
 {code}
 
 input_str = sys.stdin.read().strip()
 result = {function_name}(input_str)
-print(result)
+if isinstance(result, list):
+    print("\\n".join(result) + "\\n")
+else:
+    print(result)
 """
         else:
             wrapped_code = code
-
         if not (wrapped_code.strip().startswith("```python") or wrapped_code.strip().startswith("```")):
             wrapped_code = f"```python\n{wrapped_code}\n```"
 
-        score, metadata_list = sandbox_fusion.compute_score(
+        _, metadata_list = sandbox_fusion.compute_score(
             sandbox_fusion_url="http://10.68.171.9:8080/run_code",
             concurrent_semaphore=None,
             memory_limit_mb=1024,
@@ -431,15 +510,37 @@ print(result)
             test_cases=ground_truth,
             continuous=True
         )
+
+        
+        total_samples = 0
+        for input_str in ground_truth.get("inputs", []):
+            lines = input_str.strip().split('\n')
+            if lines and lines[0].isdigit():
+                total_samples += int(lines[0])
+        
+        passed_samples = 0
+        failed_samples = 0
         
         for meta in metadata_list:
             if meta.get("status") == "success":
+                input_str = ground_truth.get("inputs", [])[meta.get("case_index", 0)]
+                lines = input_str.strip().split('\n')
+                if lines and lines[0].isdigit():
+                    test_cases_in_this_input = int(lines[0])
+                    passed_samples += test_cases_in_this_input
+                
                 passed_tests.append({
                     "stdout": meta.get("stdout", ""),
                     "stderr": meta.get("stderr", ""),
                     "execution_time": meta.get("duration", 0.0)
                 })
             else:
+                input_str = ground_truth.get("inputs", [])[meta.get("case_index", 0)]
+                lines = input_str.strip().split('\n')
+                if lines and lines[0].isdigit():
+                    test_cases_in_this_input = int(lines[0])
+                    failed_samples += test_cases_in_this_input
+                
                 failed_tests.append({
                     "status": meta.get("status", "unknown"),
                     "stdout": meta.get("stdout", ""),
@@ -448,9 +549,10 @@ print(result)
                     "error": meta.get("api_request_error", "Unknown error")
                 })
         
-        total_tests = len(ground_truth.get("inputs", []))
-        passed_count = len(passed_tests)
-        pred = f"{passed_count}/{total_tests}" if total_tests > 0 else "0/0"
+        if total_samples > 0:
+            score = passed_samples / total_samples
+        else:
+            score = 0.0
         
     except Exception as e:
         logger.warning(f"Failed to evaluate test cases: {e}")
@@ -462,10 +564,6 @@ print(result)
 
     result = {
         "score": float(score),
-        "pred": pred,
-        "passed_count": len(passed_tests),
-        "failed_count": len(failed_tests),
-        "total_tests": len(ground_truth.get("inputs", [])),
         "data_source": data_source,
         "num_turns": num_turns
     }
