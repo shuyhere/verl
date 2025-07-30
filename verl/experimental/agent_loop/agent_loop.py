@@ -254,6 +254,9 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        # 保存当前批次以便后续使用
+        self._current_batch = batch
+        
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -316,6 +319,27 @@ class AgentLoopWorker:
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
             )
+            
+            
+            # 设置数据上下文，确保 tools_kwargs 能正确传递
+            if hasattr(self, '_current_batch') and self._current_batch is not None:
+                sample_index = trajectory["sample_index"]
+                if sample_index < len(self._current_batch):
+                    # 提取当前样本的数据上下文
+                    data_context = {}
+                    for key, value in self._current_batch.non_tensor_batch.items():
+                        if isinstance(value, (list, np.ndarray)) and sample_index < len(value):
+                            data_context[key] = value[sample_index]
+                        else:
+                            data_context[key] = value
+                    
+                    # 设置到 agent_loop 中
+                    if hasattr(agent_loop, '_current_data_context'):
+                        agent_loop._current_data_context = data_context
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(f"Set data context for sample {sample_index}: {list(data_context.keys())}")
+            
+            
             output = await agent_loop.run(messages, sampling_params)
             return output
 

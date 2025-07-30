@@ -197,31 +197,28 @@ async def apply_scorers_to_call(call, result, scorers, instance=None):
         for scorer in scorers:
             print(f"Applying scorer {scorer.__class__.__name__}")
             
-            # 尝试从 result 中提取文本
             prompt_text = ""
             response_text = ""
             
             if hasattr(result, 'prompt_ids') and hasattr(result, 'response_ids'):
-                # 如果有 tokenizer，解码 tokens
                 try:
                     if instance and hasattr(instance, 'tokenizer') and hasattr(instance.tokenizer, 'decode'):
                         loop = asyncio.get_running_loop()
                         prompt_text = await loop.run_in_executor(None, instance.tokenizer.decode, result.prompt_ids)
                         response_text = await loop.run_in_executor(None, instance.tokenizer.decode, result.response_ids)
                     else:
-                        prompt_text = "prompt_text"  # 占位符
-                        response_text = "response_text"  # 占位符
+                        prompt_text = "prompt_text"
+                        response_text = "response_text"
                 except Exception as decode_error:
                     print(f"Error decoding tokens: {decode_error}")
-                    prompt_text = "prompt_text"  # 占位符
-                    response_text = "response_text"  # 占位符
+                    prompt_text = "prompt_text" 
+                    response_text = "response_text"  
             
-            # 直接调用 scorer 的 score 方法
+
             try:
                 score_result = await scorer.score(response_text, prompt_text)
                 print(f"Scorer {scorer.__class__.__name__} result: {score_result}")
                 
-                # 将结果添加到 call 的属性中
                 if hasattr(call, 'add_attribute'):
                     call.add_attribute(f"scorer_{scorer.name}", score_result)
                 
@@ -277,10 +274,8 @@ def rollout_trace_op(func):
                 else:
                     tracer.finish_call(call, output=result)
 
-                # Apply scorers after finishing the call
                 if scorers:
                     print(f"Applying scorers: {scorers}")
-                    # 传递 self 以便访问 tokenizer
                     await apply_scorers_to_call(call, result, scorers, self)
 
                 return result

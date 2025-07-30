@@ -30,6 +30,10 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 @register("tool_agent")
 class ToolAgentLoop(AgentLoopBase):
+    def __init__(self, trainer_config, server_manager, tokenizer, **kwargs):
+        super().__init__(trainer_config, server_manager, tokenizer, **kwargs)
+        self._current_data_context = {}
+        
     @classmethod
     def init_class(cls, config, tokenizer, **kwargs):
         if cls._class_initialized:
@@ -295,8 +299,17 @@ class ToolAgentLoop(AgentLoopBase):
             tool_args = json.loads(tool_call.arguments)
             tool = self.tools[tool_name]
 
-            instance_id = await tool.create()
-            tool_response, _, _ = await tool.execute(instance_id, tool_args)
+            # 从当前数据上下文中获取 create_kwargs
+            create_kwargs = {}
+            if hasattr(self, '_current_data_context') and self._current_data_context:
+                tools_kwargs = self._current_data_context.get('tools_kwargs', {})
+                if tool_name in tools_kwargs:
+                    create_kwargs = tools_kwargs[tool_name].get('create_kwargs', {})
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"Found create_kwargs for tool {tool_name}: {create_kwargs}")
+
+            instance_id = await tool.create(**create_kwargs)
+            tool_response, tool_reward_score, tool_metrics = await tool.execute(instance_id, tool_args)
         except Exception as e:
             logger.exception(f"Error when executing tool: {e}")
             return e

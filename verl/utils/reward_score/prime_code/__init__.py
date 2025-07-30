@@ -50,6 +50,7 @@ def compute_score(completion, test_cases, continuous=False):
             metadata_list = []
             res_list = []
             for test_case_id, test_case in enumerate(test_cases_list):
+                import ipdb; ipdb.set_trace()
                 res, metadata = apps_check_correctness(in_outs=test_case, generation=solution, timeout=10, debug=False)
                 try:
                     metadata = dict(enumerate(metadata))[0]  # metadata can be empty occasionally

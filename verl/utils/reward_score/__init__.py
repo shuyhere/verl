@@ -70,12 +70,14 @@ def default_compute_score(
         from . import prime_math
 
         res = prime_math.compute_score(solution_str, ground_truth)
-    elif data_source in ["codecontests", "apps", "codeforces", "taco"]:
+    
+    # for code task, we use sandbox_fusion to evaluate the code
+    elif data_source in ["codecontests", "apps", "codeforces", "taco", "codeagentic_training"]:
         # Use the passed sandbox_fusion_url if available
         if sandbox_fusion_url:
             from . import sandbox_fusion
 
-            # Pass the URL directly, ground_truth likely contains test cases here
+            # Pass the URL directly, ground_truth likely contains test cases here  
             res = sandbox_fusion.compute_score(
                 sandbox_fusion_url, concurrent_semaphore, memory_limit_mb, solution_str, ground_truth, continuous=True
             )

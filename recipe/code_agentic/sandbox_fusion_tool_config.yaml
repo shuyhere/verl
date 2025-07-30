@@ -1,5 +1,5 @@
 tools:
-  - class_name: "recipe.retool.retool.CustomSandboxFusionTool"
+  - class_name: "recipe.code_agentic.code_agentic.SandboxFusionTestCaseTool"
     config:
       sandbox_fusion_url: "http://10.68.171.9:8080/run_code"
       num_workers: 128
