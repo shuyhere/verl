@@ -357,9 +357,81 @@ class CodeAgenticDataset(RLHFDataset):
                 print(f"Could not load dataframe from {data_file}")
                 continue
             
+            # 添加数据过滤：移除过大的样本
+            print(f"Original dataset size: {len(dataframe)}")
+            
+            def filter_large_samples(example):
+                """过滤掉过大的样本"""
+                question = example.get("question", [""])[0] if isinstance(example.get("question"), list) else example.get("question", "")
+                input_output = example.get("input_output", [""])[0] if isinstance(example.get("input_output"), list) else example.get("input_output", "")
+                
+                # 检查问题大小
+                if len(str(question)) > 50000:
+                    return False
+                
+                # 检查输入输出大小
+                if len(str(input_output)) > 100000:
+                    return False
+                
+                # 尝试解析 input_output 并检查测试用例大小
+                if isinstance(input_output, str):
+                    try:
+                        import json
+                        parsed = json.loads(input_output)
+                        inputs = parsed.get("inputs", [])
+                        outputs = parsed.get("outputs", [])
+                        
+                        # 检查总输入输出大小
+                        total_input_size = sum(len(str(inp)) for inp in inputs)
+                        total_output_size = sum(len(str(out)) for out in outputs)
+                        
+                        if total_input_size > 200000 or total_output_size > 200000:
+                            return False
+                            
+                    except (json.JSONDecodeError, Exception):
+                        # 如果解析失败，检查原始字符串大小
+                        if len(input_output) > 100000:
+                            return False
+                
+                return True
+            
+            # 应用过滤
+            dataframe = dataframe.filter(filter_large_samples)
+            print(f"After filtering large samples: {len(dataframe)}")
+            
+            # 添加调试：检查第999个样本
+            if len(dataframe) > 999:
+                print(f"DEBUG: Checking sample at index 999")
+                sample_999 = dataframe[999]
+                print(f"Sample 999 keys: {list(sample_999.keys())}")
+                
+                # 检查数据大小
+                for key, value in sample_999.items():
+                    if isinstance(value, str):
+                        size = len(value)
+                        print(f"  {key}: {size} chars")
+                        if size > 10000:
+                            print(f"    Preview: {value[:200]}...")
+                    elif isinstance(value, list):
+                        total_size = sum(len(str(item)) for item in value)
+                        print(f"  {key}: list with {len(value)} items, total {total_size} chars")
+                        if total_size > 10000:
+                            print(f"    First item preview: {str(value[0])[:200]}...")
+                
+                # 尝试手动处理第999个样本
+                try:
+                    print("DEBUG: Manually processing sample 999...")
+                    result = self.map_fn(sample_999, "codeforces")
+                    result_size = len(str(result))
+                    print(f"Sample 999 processed successfully, result size: {result_size}")
+                except Exception as e:
+                    print(f"ERROR: Failed to process sample 999: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
             # NOTE: Limit to 1% of data for debugging
-            debug_size = max(256, int(len(dataframe) * 0.01))
-            dataframe = dataframe.select(range(min(debug_size, len(dataframe))))
+            # debug_size = max(256, int(len(dataframe) * 0.01))
+            # dataframe = dataframe.select(range(min(debug_size, len(dataframe))))
             
             data_source = "/".join(data_file.split("/")[-1:])
             # NOTE: you can add more data source and map_fn
@@ -382,18 +454,33 @@ class CodeAgenticDataset(RLHFDataset):
     
     def map_fn(self, row: dict, data_source: str = "code_agentic"):
         """Map dataset row to training format with code agentic prompt"""
+        # 添加调试信息
+        import os
+        worker_id = os.getpid()
+        
         question = row.get("question", [""])[0] if isinstance(row.get("question"), list) else row.get("question", "")
         input_output = row.get("input_output", [""])[0] if isinstance(row.get("input_output"), list) else row.get("input_output", "")
         
-        prompt_content = f"""You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests. Note, you can only use the provided
-code_interpreter tool to execute your code.
+        # 检查数据大小
+        question_size = len(str(question))
+        input_output_size = len(str(input_output))
+        
+        # 如果数据过大，记录警告
+        if question_size > 10000 or input_output_size > 10000:
+            print(f"WARNING: Large data detected at worker {worker_id}")
+            print(f"  question_size: {question_size}")
+            print(f"  input_output_size: {input_output_size}")
+            print(f"  question preview: {str(question)[:200]}...")
+            print(f"  input_output preview: {str(input_output)[:200]}...")
+        
+        prompt_content = f"""You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests.
 
 		### Code problem:
 		{question}
         
         Remember to put your answer on its own line after \"Answer:\".
 		"""
-        answer_format = """\nThe final code solution format must be a COMPLETE python FUNCTION which begins with "```python def" and ends with "return ... ```" that can be executed with the input data provided and a return value. AND THE CODE MUST BE INSIDE A ```python``` BLOCK."""
+        answer_format = """\nThe final code solution format must be a complete python function that can be executed with the input data provided and a return value."""
         if isinstance(input_output, str):
             try:
                 import json
@@ -403,6 +490,17 @@ code_interpreter tool to execute your code.
         
         inputs = input_output.get("inputs", [])
         outputs = input_output.get("outputs", [])
+        
+        # 检查输入输出数据的大小
+        total_input_size = sum(len(str(inp)) for inp in inputs)
+        total_output_size = sum(len(str(out)) for out in outputs)
+        
+        if total_input_size > 50000 or total_output_size > 50000:
+            print(f"WARNING: Very large test cases detected at worker {worker_id}")
+            print(f"  total_input_size: {total_input_size}")
+            print(f"  total_output_size: {total_output_size}")
+            print(f"  num_inputs: {len(inputs)}")
+            print(f"  num_outputs: {len(outputs)}")
         
         # Create test cases in the format expected by prime_code
         test_cases_dict = {
@@ -420,7 +518,7 @@ code_interpreter tool to execute your code.
             }
             test_cases_detailed.append(test_case)
 
-        return {
+        result = {
             "prompt": [{"role": "user", "content": prompt_content+answer_format}],
             "ability": "CODE_DEBUG",
             "reward_model": {"ground_truth": test_cases_dict},  
@@ -437,6 +535,13 @@ code_interpreter tool to execute your code.
                 },
             }
         }
+        
+        # 检查结果数据的大小
+        result_size = len(str(result))
+        if result_size > 100000:
+            print(f"WARNING: Very large result data at worker {worker_id}: {result_size} chars")
+        
+        return result
         
 
 

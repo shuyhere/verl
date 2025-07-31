@@ -242,6 +242,18 @@ class SelfAwarenessScorer(BaseScorer):
                     "details": result,
                     "model": self.model
                 }
+            except ImportError:
+                logger.warning("OpenAI library not available, using mock result")
+                return self._mock_score(response_text, prompt_text)
+            
+        except Exception as e:
+            logger.error(f"Self awareness scorer failed: {e}")
+            return {
+                "scorer_name": self.name,
+                "score": -1.0,
+                "error": str(e),
+                "model": self.model
+            }
     
     def _extract_final_answer_score(self, result: str) -> float:
         try:

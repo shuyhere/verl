@@ -22,7 +22,6 @@ except ImportError as e:
     from code_agentic import SandboxFusionTestCaseTool
     from verl.tools.base_tool import OpenAIFunctionToolSchema
 
-# 设置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
