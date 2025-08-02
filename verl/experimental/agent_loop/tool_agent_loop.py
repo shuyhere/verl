@@ -213,7 +213,8 @@ class ToolAgentLoop(AgentLoopBase):
             logger.error(f"Failed to add scorer: {e}")
 
     @rollout_trace_op
-    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any]) -> AgentLoopOutput:
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        messages = list(kwargs["raw_prompt"])
         metrics = {}
         request_id = uuid4().hex
         prompt_ids = await self.loop.run_in_executor(
@@ -223,6 +224,7 @@ class ToolAgentLoop(AgentLoopBase):
             ),
         )
         response_mask = []
+        tools_kwargs = kwargs.get("tools_kwargs", {})
 
         user_turns, assistant_turns = 0, 0
         while True:
@@ -254,7 +256,7 @@ class ToolAgentLoop(AgentLoopBase):
             # call tools
             tasks = []
             for tool_call in tool_calls[: self.max_parallel_calls]:
-                tasks.append(self._call_tool(tool_call))
+                tasks.append(self._call_tool(tool_call, tools_kwargs))
             with simple_timer("tool_calls", metrics):
                 tool_responses = await asyncio.gather(*tasks)
             if any(isinstance(item, Exception) for item in tool_responses):
@@ -290,7 +292,7 @@ class ToolAgentLoop(AgentLoopBase):
         )
         return output
 
-    async def _call_tool(self, tool_call: FunctionCall) -> dict[str, str]:
+    async def _call_tool(self, tool_call: FunctionCall, tools_kwargs: dict[str, Any]) -> dict[str, str]:
         """Call tool and return tool response."""
         tool, instance_id = None, None
         try:
