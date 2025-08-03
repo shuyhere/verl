@@ -86,7 +86,6 @@ def extract_interpreter_message(content: str) -> tuple[dict[str, Any], str]:
     }
     return message, content[j + len(stop) :]
 
-
 def process(row: dict, *, tools: str):
     messages = []
 

@@ -51,8 +51,7 @@ def test_compute_code_score():
         "memory_limit_mb": 1024
     }
 
-    # 测试用例1：正确的解决方案（返回列表，但会被自动转换为字符串）
-    correct_solution = """```python
+    correct_solution = """<code>
 def solution(input_str):
     lines = input_str.strip().split('\\n')
     t = int(lines[0])
@@ -68,7 +67,7 @@ def solution(input_str):
             results.append("NO")
     
     return results
-```"""
+</code>"""
 
     print("=" * 80)
     print("测试用例1：正确的解决方案")

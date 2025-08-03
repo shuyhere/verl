@@ -29,6 +29,7 @@ from verl.tools.sandbox_fusion_tools import SandboxFusionTool
 from verl.utils.dataset import RLHFDataset
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.utils.reward_score import sandbox_fusion
+from recipe.code_agentic.code_agentic_utils import *
 
 logger = logging.getLogger(__name__)
 
@@ -64,76 +65,29 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
     
     def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
         super().__init__(config, tool_schema)
-        self.code_pattern = re.compile(r"```python(.*?)```", re.DOTALL)
+        self.code_pattern = extract_code_pattern()
         self.max_debug_attempts = 5
         self.debug_history: List[Dict[str, Any]] = []
         self.instance_test_cases: Dict[str, List[dict]] = {}
     
     def _preprocess_code(self, code: str) -> str:
         """Preprocess code to fix common syntax errors"""
-        if not code:
-            return code
-        lines = code.split("\n")
-        processed_lines = []
-        
-        for line in lines:
-            # Fix common syntax errors
-            line = re.sub(r'(\w+)\^(\w+)', r'\1**\2', line)  # Fix ^ to **
-            processed_lines.append(line)
-        
-        return "\n".join(processed_lines)
+        return preprocess_code(code)
     
     def _prepare_code_for_testing(self, code: str, test_cases: List[dict]) -> str:
-        if "```python" in code:
-            code = code.split("```python")[-1].split("```")[0]
-        elif "```" in code:
-            parts = code.split("```")
-            if len(parts) >= 2:
-                code = parts[1]
-                if "\n" in code:
-                    first_line, rest = code.split("\n", 1)
-                    if first_line.strip().isalpha():
-                        code = rest
+        return prepare_code_for_testing(code, test_cases)
+    
+    def _extract_code_from_response(self, response: str) -> str:
+        """
+        Extract code from model response using the new prompt format
         
-        # 如果没有找到代码块，直接寻找 def 和 return 来定位代码
-        if "def " in code:
-            def_match = re.search(r'def\s+\w+\s*\([^)]*\)[^:]*:', code, re.DOTALL)
-            if def_match:
-                # 找到 def 的位置
-                def_start = def_match.start()
-                # 寻找最后一个 return 语句
-                return_matches = list(re.finditer(r'return\s+[^\\n]+', code, re.DOTALL))
-                if return_matches:
-                    # 取最后一个 return 的位置
-                    last_return = return_matches[-1]
-                    return_end = last_return.end()
-                    # 提取从 def 开始到最后一个 return 结束的代码
-                    code = code[def_start:return_end].strip()
-                else:
-                    # 如果没有找到 return，从 def 开始到代码结束
-                    code = code[def_start:].strip()
-        
-        if "def " in code:
-            function_match = re.search(r'def\s+(\w+)\s*\(', code)
-            if function_match:
-                function_name = function_match.group(1)
-            else:
-                function_name = "solution"
+        Args:
+            response: Model response text
             
-            complete_code = f"""import sys
-
-{code}
-
-input_str = sys.stdin.read().strip()
-result = {function_name}(input_str)
-if isinstance(result, list):
-    print("\\n".join(result) + "\\n")
-else:
-    print(result)
-"""
-            return complete_code
-        else:
-            return code
+        Returns:
+            Extracted code
+        """
+        return extract_final_code_from_response(response)
     
     
     async def create(self, instance_id: Optional[str] = None, ground_truth: Optional[dict] = None, **kwargs) -> str:
@@ -167,12 +121,19 @@ else:
         code = parameters.get("code", "")
         if not code:
             return "No code provided", 0.0, {"error": "no_code"}
-        matches = self.code_pattern.findall(code)
-        if matches:
-            code = matches[0].strip()
+        
+        # Extract code from response using new prompt format
+        extracted_code = self._extract_code_from_response(code)
+        if extracted_code:
+            code = extracted_code
+        else:
+            # Fallback to traditional markdown extraction
+            matches = self.code_pattern.findall(code)
+            if matches:
+                code = matches[0].strip()
         
         code = self._preprocess_code(code)
-        
+        import ipdb; ipdb.set_trace()
         timeout = parameters.get("timeout", self.default_timeout)
         language = parameters.get("language", self.default_language)
         
@@ -196,9 +157,11 @@ else:
         try:
             processed_code = self._prepare_code_for_testing(code, test_cases)
             formatted_code = processed_code
+            
             if not ("```python" in processed_code or "```" in processed_code):
                 formatted_code = f"```python\n{processed_code}\n```"
             
+            import ipdb; ipdb.set_trace()
             _, metadata_list = sandbox_fusion.compute_score(
                 sandbox_fusion_url=self.sandbox_fusion_url,
                 concurrent_semaphore=None,
@@ -218,8 +181,8 @@ else:
             failed_samples = 0
             passed_tests = []
             failed_tests = []
-            failed_samples_details = []  # 存储失败的小样本详情
-            
+            failed_samples_details = [] 
+            import ipdb; ipdb.set_trace()
             for i, meta in enumerate(metadata_list):
                 if meta.get("status") == "success":
                     input_str = test_cases.get("inputs", [])[meta.get("case_index", 0)]
@@ -240,7 +203,6 @@ else:
                         test_cases_in_this_input = int(lines[0])
                         failed_samples += test_cases_in_this_input
                         
-                        # 添加失败的小样本详情（限制前5个）
                         if len(failed_samples_details) < 5:
                             failed_samples_details.append({
                                 "case_index": meta.get("case_index", 0),
@@ -278,7 +240,7 @@ else:
                 "passed_samples": passed_samples,
                 "failed_tests": len(failed_tests),
                 "failed_samples": failed_samples,
-                "failed_samples_details": failed_samples_details,  # 前5个失败的小样本详情
+                "failed_samples_details": failed_samples_details, 
             }
 
             output_lines = []
@@ -287,24 +249,8 @@ else:
             output_lines.append(f"\nTest Case Evaluation:")
             output_lines.append(f"Score: {score:.3f}")
             output_lines.append(f"Tests Passed: {passed_samples}/{total_samples}")
-            
-            if failed_samples_details:
-                output_lines.append(f"\nFailed Samples:")
-                for i, detail in enumerate(failed_samples_details[:2]): 
-                    output_lines.append(f"  Sample {i+1}:")
-                    input_str = detail.get('input', '')
-                    lines = input_str.strip().split('\n')
-                    if lines and lines[0].isdigit():
-                        t = int(lines[0])
-                        output_lines.append(f"    Test cases: {t}")
-                        for j in range(1, min(t+1, 4)):
-                            if j < len(lines):
-                                output_lines.append(f"    Case {j}: {lines[j]}")
-                        if t > 3:
-                            output_lines.append(f"    ... and {t-3} more cases")
-                    output_lines.append(f"    Expected output: {detail.get('expected_output', 'N/A')}")
-                    output_lines.append(f"    Your output: {detail.get('actual_output', 'N/A')}")
-                    output_lines.append("")
+            output_lines.append(f"Failed Tests: {failed_samples}")
+            output_lines.append(f"Failed Samples: {failed_samples_details}")
             
             return "\n".join(output_lines), score, metadata
             
@@ -357,23 +303,22 @@ class CodeAgenticDataset(RLHFDataset):
                 print(f"Could not load dataframe from {data_file}")
                 continue
             
-            # 添加数据过滤：移除过大的样本
             print(f"Original dataset size: {len(dataframe)}")
             
             def filter_large_samples(example):
-                """过滤掉过大的样本"""
+                """filter out large samples"""
                 question = example.get("question", [""])[0] if isinstance(example.get("question"), list) else example.get("question", "")
                 input_output = example.get("input_output", [""])[0] if isinstance(example.get("input_output"), list) else example.get("input_output", "")
                 
-                # 检查问题大小
+                # check question size
                 if len(str(question)) > 50000:
                     return False
                 
-                # 检查输入输出大小
+                # check input output size
                 if len(str(input_output)) > 100000:
                     return False
                 
-                # 尝试解析 input_output 并检查测试用例大小
+                # try to parse input_output and check test case size
                 if isinstance(input_output, str):
                     try:
                         import json
@@ -381,7 +326,7 @@ class CodeAgenticDataset(RLHFDataset):
                         inputs = parsed.get("inputs", [])
                         outputs = parsed.get("outputs", [])
                         
-                        # 检查总输入输出大小
+                        # check total input output size
                         total_input_size = sum(len(str(inp)) for inp in inputs)
                         total_output_size = sum(len(str(out)) for out in outputs)
                         
@@ -389,45 +334,15 @@ class CodeAgenticDataset(RLHFDataset):
                             return False
                             
                     except (json.JSONDecodeError, Exception):
-                        # 如果解析失败，检查原始字符串大小
+                        # if parse failed, check original string size
                         if len(input_output) > 100000:
                             return False
                 
                 return True
             
-            # 应用过滤
+            # apply filter
             dataframe = dataframe.filter(filter_large_samples)
             print(f"After filtering large samples: {len(dataframe)}")
-            
-            # 添加调试：检查第999个样本
-            if len(dataframe) > 999:
-                print(f"DEBUG: Checking sample at index 999")
-                sample_999 = dataframe[999]
-                print(f"Sample 999 keys: {list(sample_999.keys())}")
-                
-                # 检查数据大小
-                for key, value in sample_999.items():
-                    if isinstance(value, str):
-                        size = len(value)
-                        print(f"  {key}: {size} chars")
-                        if size > 10000:
-                            print(f"    Preview: {value[:200]}...")
-                    elif isinstance(value, list):
-                        total_size = sum(len(str(item)) for item in value)
-                        print(f"  {key}: list with {len(value)} items, total {total_size} chars")
-                        if total_size > 10000:
-                            print(f"    First item preview: {str(value[0])[:200]}...")
-                
-                # 尝试手动处理第999个样本
-                try:
-                    print("DEBUG: Manually processing sample 999...")
-                    result = self.map_fn(sample_999, "codeforces")
-                    result_size = len(str(result))
-                    print(f"Sample 999 processed successfully, result size: {result_size}")
-                except Exception as e:
-                    print(f"ERROR: Failed to process sample 999: {e}")
-                    import traceback
-                    traceback.print_exc()
             
             # NOTE: Limit to 1% of data for debugging
             # debug_size = max(256, int(len(dataframe) * 0.01))
@@ -446,26 +361,22 @@ class CodeAgenticDataset(RLHFDataset):
             raise ValueError("No valid data files could be loaded")
         
         self.dataframe = datasets.concatenate_datasets(dataframes)
-        print("*"*100)
         print(f"Dataset loaded with {len(self.dataframe)} samples")
         print(self.dataframe[0])
-        print("*"*100)
         
     
     def map_fn(self, row: dict, data_source: str = "code_agentic"):
         """Map dataset row to training format with code agentic prompt"""
-        # 添加调试信息
+        
         import os
         worker_id = os.getpid()
         
         question = row.get("question", [""])[0] if isinstance(row.get("question"), list) else row.get("question", "")
         input_output = row.get("input_output", [""])[0] if isinstance(row.get("input_output"), list) else row.get("input_output", "")
         
-        # 检查数据大小
         question_size = len(str(question))
         input_output_size = len(str(input_output))
         
-        # 如果数据过大，记录警告
         if question_size > 10000 or input_output_size > 10000:
             print(f"WARNING: Large data detected at worker {worker_id}")
             print(f"  question_size: {question_size}")
@@ -473,14 +384,8 @@ class CodeAgenticDataset(RLHFDataset):
             print(f"  question preview: {str(question)[:200]}...")
             print(f"  input_output preview: {str(input_output)[:200]}...")
         
-        prompt_content = f"""You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests.
-
-		### Code problem:
-		{question}
-        
-        Remember to put your answer on its own line after \"Answer:\".
-		"""
-        answer_format = """\nThe final code solution format must be a complete python function that can be executed with the input data provided and a return value."""
+        prompt_content = get_code_problem_prompt(question)
+        answer_format = get_answer_format()
         if isinstance(input_output, str):
             try:
                 import json
@@ -491,7 +396,6 @@ class CodeAgenticDataset(RLHFDataset):
         inputs = input_output.get("inputs", [])
         outputs = input_output.get("outputs", [])
         
-        # 检查输入输出数据的大小
         total_input_size = sum(len(str(inp)) for inp in inputs)
         total_output_size = sum(len(str(out)) for out in outputs)
         
@@ -536,7 +440,6 @@ class CodeAgenticDataset(RLHFDataset):
             }
         }
         
-        # 检查结果数据的大小
         result_size = len(str(result))
         if result_size > 100000:
             print(f"WARNING: Very large result data at worker {worker_id}: {result_size} chars")
@@ -553,59 +456,10 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
     pred = "0/0"
     
     try:
-        code = solution_str
+        # 这些函数已经通过 from recipe.code_agentic.code_agentic_utils import * 导入了
         
-        # 首先尝试提取 markdown 代码块
-        code_block = None
-        match = re.search(r"```python(.*?)(```|$)", code, re.DOTALL | re.IGNORECASE)
-        if match:
-            code_block = match.group(1).strip()
-        else:
-            match = re.search(r"```(.*?)(```|$)", code, re.DOTALL)
-            if match:
-                code_block = match.group(1).strip()
-        
-        if code_block:
-            code = code_block
-        else:
-            # 如果没有找到代码块，直接寻找 def 和 return 来定位代码
-            def_match = re.search(r'def\s+\w+\s*\([^)]*\)[^:]*:', code, re.DOTALL)
-            if def_match:
-                # 找到 def 的位置
-                def_start = def_match.start()
-                # 寻找最后一个 return 语句
-                return_matches = list(re.finditer(r'return\s+[^\\n]+', code, re.DOTALL))
-                if return_matches:
-                    # 取最后一个 return 的位置
-                    last_return = return_matches[-1]
-                    return_end = last_return.end()
-                    # 提取从 def 开始到最后一个 return 结束的代码
-                    code = code[def_start:return_end].strip()
-                else:
-                    # 如果没有找到 return，从 def 开始到代码结束
-                    code = code[def_start:].strip()
-            else:
-                # 如果连 def 都找不到，使用原始代码
-                code = code.strip()
-            
-        function_match = re.search(r'def\s+(\w+)\s*\(', code)
-        if function_match:
-            function_name = function_match.group(1)
-            wrapped_code = f"""import sys
-
-{code}
-
-input_str = sys.stdin.read().strip()
-result = {function_name}(input_str)
-if isinstance(result, list):
-    print("\\n".join(result) + "\\n")
-else:
-    print(result)
-"""
-        else:
-            wrapped_code = code
-        if not (wrapped_code.strip().startswith("```python") or wrapped_code.strip().startswith("```")):
-            wrapped_code = f"```python\n{wrapped_code}\n```"
+        code = extract_final_code_from_response(solution_str)
+        wrapped_code = wrap_code_for_execution(code)
 
         _, metadata_list = sandbox_fusion.compute_score(
             sandbox_fusion_url="http://10.68.171.9:8080/run_code",
