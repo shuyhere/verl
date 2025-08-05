@@ -301,7 +301,6 @@ class ToolAgentLoop(AgentLoopBase):
             tool_args = json.loads(tool_call.arguments)
             tool = self.tools[tool_name]
 
-            # 从当前数据上下文中获取 create_kwargs
             create_kwargs = {}
             if hasattr(self, '_current_data_context') and self._current_data_context:
                 tools_kwargs = self._current_data_context.get('tools_kwargs', {})
