@@ -446,82 +446,141 @@ class CodeAgenticDataset(RLHFDataset):
 
 
 def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, extra_info: dict) -> dict:
+    """for code agentic:
+    1) format reward: if can extract code, give positive reward;
+    2) tool usage reward: give reward based on tool calls/types;
+    3) test pass reward: scale up pass rate, and give extra reward for perfect pass;
+    4) final score clipped to [0, 1].
+    """
 
-    score = 0.0
-    passed_tests = []
-    failed_tests = []
-    pred = "0/0"
-    
+    # 1) default values and weights
+    pass_rate = 0.0
+    num_turns = int(extra_info.get("num_turns", 1) or 1)
+
+    format_reward = 0.10           # code extraction reward
+    format_bonus_semantic = 0.05   # code looks more executable (def/import/main)
+    tool_unit_reward = 0.03        # single tool call reward
+    tool_reward_cap = 0.20         # tool call reward cap
+    tool_bonus_code_interpreter = 0.05  # extra reward for using code interpreter etc.
+
+    turn_efficiency_bonus = 0.05   # positive reward for 2 turns
+    turn_penalty_many = 0.05       # negative reward for many turns
+
+    test_scale = 1.20              # scale up pass rate
+    perfect_bonus = 0.20           # extra reward for perfect pass
+    mid_bonus = 0.05               # extra reward for pass rate > 0.5
+
+    # 2) parse code and run test
+    has_code = False
     try:
-        # 这些函数已经通过 from recipe.code_agentic.code_agentic_utils import * 导入了
-        
         code = extract_final_code_from_response(solution_str)
-        wrapped_code = wrap_code_for_execution(code)
+        has_code = bool(code and code.strip())
+
+        # try to wrap code for execution
+        wrapped_code = wrap_code_for_execution(code if has_code else solution_str)
 
         _, metadata_list = sandbox_fusion.compute_score(
-            sandbox_fusion_url="http://10.68.171.9:8080/run_code",
+            sandbox_fusion_url="http://10.68.171.9:8080/run_code", # TODO: change to your sandbox fusion url
             concurrent_semaphore=None,
             memory_limit_mb=1024,
             completion=wrapped_code,
             test_cases=ground_truth,
-            continuous=True
+            continuous=True,
         )
 
-        
+        # count passed samples
         total_samples = 0
         for input_str in ground_truth.get("inputs", []):
-            lines = input_str.strip().split('\n')
+            lines = input_str.strip().split("\n")
             if lines and lines[0].isdigit():
                 total_samples += int(lines[0])
-        
+
         passed_samples = 0
-        failed_samples = 0
-        
         for meta in metadata_list:
-            if meta.get("status") == "success":
-                input_str = ground_truth.get("inputs", [])[meta.get("case_index", 0)]
-                lines = input_str.strip().split('\n')
-                if lines and lines[0].isdigit():
-                    test_cases_in_this_input = int(lines[0])
-                    passed_samples += test_cases_in_this_input
-                
-                passed_tests.append({
-                    "stdout": meta.get("stdout", ""),
-                    "stderr": meta.get("stderr", ""),
-                    "execution_time": meta.get("duration", 0.0)
-                })
-            else:
-                input_str = ground_truth.get("inputs", [])[meta.get("case_index", 0)]
-                lines = input_str.strip().split('\n')
-                if lines and lines[0].isdigit():
-                    test_cases_in_this_input = int(lines[0])
-                    failed_samples += test_cases_in_this_input
-                
-                failed_tests.append({
-                    "status": meta.get("status", "unknown"),
-                    "stdout": meta.get("stdout", ""),
-                    "stderr": meta.get("stderr", ""),
-                    "execution_time": meta.get("duration", 0.0),
-                    "error": meta.get("api_request_error", "Unknown error")
-                })
-        
+            status = meta.get("status")
+            case_index = meta.get("case_index", 0)
+            input_str = ground_truth.get("inputs", [""])[case_index]
+            lines = input_str.strip().split("\n")
+            if lines and lines[0].isdigit():
+                case_cnt = int(lines[0])
+                if status == "success":
+                    passed_samples += case_cnt
+
         if total_samples > 0:
-            score = passed_samples / total_samples
+            pass_rate = passed_samples / total_samples
         else:
-            score = 0.0
-        
+            pass_rate = 0.0
+
     except Exception as e:
         logger.warning(f"Failed to evaluate test cases: {e}")
 
-    num_turns = extra_info.get("num_turns", 1)
-    if score < 0:
-        tool_call_reward = (num_turns - 2) / 2 * 0.1
-        score = min(0, score + tool_call_reward)
+    # 3) reward shaping: format, tool, turn, test pass
+    shaped_score = 0.0
+
+    # 3.1 format reward
+    if has_code:
+        shaped_score += format_reward
+        # code looks more executable, give a little bonus
+        try:
+            if re.search(r"\bdef\s+\w+\s*\(", code) or ("if __name__" in code) or ("import " in code):
+                shaped_score += format_bonus_semantic
+        except Exception:
+            pass
+    else:
+        # if code extraction failed, use original string for lightweight structure check, if looks like code, give basic reward
+        try:
+            raw = solution_str or ""
+            looks_like_code = (
+                ("```" in raw)
+                or re.search(r"\bdef\s+\w+\s*\(", raw)
+                or ("#include" in raw)
+                or ("class " in raw)
+                or ("import " in raw)
+            )
+            if looks_like_code:
+                shaped_score += format_reward * 0.8
+        except Exception:
+            pass
+
+    # 3.2 tool call reward
+    num_tool_calls = int(
+        extra_info.get("num_tool_calls")
+        or extra_info.get("tool_calls")
+        or 0
+    )
+    used_tools = extra_info.get("used_tools") or []
+    try:
+        tool_reward = min(tool_reward_cap, max(0, num_tool_calls) * tool_unit_reward)
+    except Exception:
+        tool_reward = 0.0
+    # if contains code interpreter / code tool, give a little bonus
+    try:
+        if isinstance(used_tools, list) and any(
+            isinstance(t, str) and ("code" in t.lower() or "interpreter" in t.lower()) for t in used_tools
+        ):
+            tool_reward += tool_bonus_code_interpreter
+    except Exception:
+        pass
+    shaped_score += tool_reward
+
+    # 3.3 turn reward (positive reward for few turns, negative reward for many turns)
+    if num_turns <= 4:
+        shaped_score += turn_efficiency_bonus
+    elif num_turns > 10:
+        shaped_score -= turn_penalty_many
+
+    # 3.4 test pass reward: scale up pass rate, and give extra reward for perfect pass
+    test_component = pass_rate * test_scale
+    if pass_rate >= 1.0:
+        test_component += perfect_bonus
+    elif pass_rate >= 0.5:
+        test_component += mid_bonus
+
+    final_score = max(0.0, min(1.0, shaped_score + test_component))
 
     result = {
-        "score": float(score),
+        "score": float(final_score),
         "data_source": data_source,
-        "num_turns": num_turns
+        "num_turns": num_turns,
     }
-    
     return result
