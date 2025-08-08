@@ -133,15 +133,14 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
                 code = matches[0].strip()
         
         code = self._preprocess_code(code)
-        import ipdb; ipdb.set_trace()
         timeout = parameters.get("timeout", self.default_timeout)
         language = parameters.get("language", self.default_language)
         
         run_result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
         
         test_cases = self.instance_test_cases.get(instance_id, [])
-        #test case format: {'inputs': ['3 4\n1 2 3\n4 5 6\n1 1 1\n0 1 2 3', '5 5\n3 4 6 8 4\n8 3 4 9 3\n10 20 30 40 50\n5 55 13 1000 113', '1 1\n3\n4\n5\n0'], 'outputs': ['2 3 3 3', '2 7 3 7 7', '7']}
         
+        #test case format: {'inputs': ['3 4\n1 2 3\n4 5 6\n1 1 1\n0 1 2 3', '5 5\n3 4 6 8 4\n8 3 4 9 3\n10 20 30 40 50\n5 55 13 1000 113', '1 1\n3\n4\n5\n0'], 'outputs': ['2 3 3 3', '2 7 3 7 7', '7']}   
         if not test_cases:
             metadata = {
                 "output": run_result,
@@ -161,7 +160,6 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
             if not ("```python" in processed_code or "```" in processed_code):
                 formatted_code = f"```python\n{processed_code}\n```"
             
-            import ipdb; ipdb.set_trace()
             _, metadata_list = sandbox_fusion.compute_score(
                 sandbox_fusion_url=self.sandbox_fusion_url,
                 concurrent_semaphore=None,
@@ -182,7 +180,6 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
             passed_tests = []
             failed_tests = []
             failed_samples_details = [] 
-            import ipdb; ipdb.set_trace()
             for i, meta in enumerate(metadata_list):
                 if meta.get("status") == "success":
                     input_str = test_cases.get("inputs", [])[meta.get("case_index", 0)]

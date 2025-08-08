@@ -33,7 +33,7 @@ from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayWorkerGroup
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
-from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr
+from verl.utils.rollout_trace import RolloutTraceConfig, rollout_trace_attr, rollout_trace_op
 from verl.workers.rollout.async_server import async_server_class
 
 logger = logging.getLogger(__file__)
@@ -77,6 +77,7 @@ class AsyncLLMServerManager:
         self.request_id_to_server[request_id] = server
         return server
 
+    # @rollout_trace_op
     async def generate(
         self,
         request_id,
@@ -240,11 +241,49 @@ class AgentLoopWorker:
                 _agent_loop_registry[agent_loop_config.name] = agent_loop_config
 
         trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
+        
+        scorers = []
+        try:
+            from verl.experimental.scores.scorer_config_loader import ScorerConfigLoader
+            scorer_loader = ScorerConfigLoader()
+
+            print(f"=== SCORER DEBUG INFO ===")
+            print(f"Config keys: {list(self.config.keys())}")
+            
+            if hasattr(self.config, 'actor_rollout_ref'):
+                print(f"actor_rollout_ref keys: {list(self.config.actor_rollout_ref.keys())}")
+                if hasattr(self.config.actor_rollout_ref, 'rollout'):
+                    print(f"rollout keys: {list(self.config.actor_rollout_ref.rollout.keys())}")
+                    trace_config_debug = self.config.actor_rollout_ref.rollout.get("trace", {})
+                    print(f"trace config: {trace_config_debug}")
+                    
+                    if 'scorers' in trace_config_debug:
+                        scorer_config = trace_config_debug['scorers']
+                        print(f"scorer config found: {scorer_config}")
+                        print(f"scorers enabled: {scorer_config.get('enabled', False)}")
+                        print(f"scorer_list: {scorer_config.get('scorer_list', [])}")
+                    else:
+                        print("No 'scorers' key found in trace config!")
+                else:
+                    print("No 'rollout' key found in actor_rollout_ref!")
+            else:
+                print("No 'actor_rollout_ref' key found in config!")
+            
+            scorers = scorer_loader.load_scorers_from_config(self.config)
+            print(f"Final loaded scorers: {len(scorers)} scorers: {scorers}")
+            print(f"=== END SCORER DEBUG ===")
+            
+        except Exception as e:
+            print(f"Failed to load scorers: {e}")
+            import traceback
+            traceback.print_exc()
+        
         RolloutTraceConfig.init(
             self.config.trainer.project_name,
             self.config.trainer.experiment_name,
             trace_config.get("backend"),
             trace_config.get("token2text", False),
+            scorers=scorers 
         )
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:
@@ -268,9 +307,6 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
-        # 保存当前批次以便后续使用
-        self._current_batch = batch
-        
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -331,29 +367,7 @@ class AgentLoopWorker:
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
             )
-            
-            
-            # 设置数据上下文，确保 tools_kwargs 能正确传递
-            if hasattr(self, '_current_batch') and self._current_batch is not None:
-                sample_index = trajectory["sample_index"]
-                if sample_index < len(self._current_batch):
-                    # 提取当前样本的数据上下文
-                    data_context = {}
-                    for key, value in self._current_batch.non_tensor_batch.items():
-                        if isinstance(value, (list, np.ndarray)) and sample_index < len(value):
-                            data_context[key] = value[sample_index]
-                        else:
-                            data_context[key] = value
-                    
-                    # 设置到 agent_loop 中
-                    if hasattr(agent_loop, '_current_data_context'):
-                        agent_loop._current_data_context = data_context
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug(f"Set data context for sample {sample_index}: {list(data_context.keys())}")
-            
-            
-            output = await agent_loop.run(messages, sampling_params)
-            return output
+            output = await agent_loop.run(sampling_params, **kwargs)
 
             # NOTE: consistent with batch version of generate_sequences in vllm_rollout_spmd.py
             # prompt_ids: left padded with zeros (e.g., [0,0,0,0,1,2,3,4])

@@ -106,8 +106,21 @@ class ScorerConfigLoader:
             return scorers
         
         scorer_list = scorer_config.get("scorer_list", [])
+
+        if hasattr(scorer_list, 'keys') and hasattr(scorer_list, 'values'):
+            # if scorer_list is dict, extract all values as scorer configs
+            scorer_items = list(scorer_list.values())
+            logger.info(f"Found {len(scorer_items)} scorers in dict format")
+        elif isinstance(scorer_list, (list, tuple)):
+            # if scorer_list is list, use it directly
+            scorer_items = scorer_list
+            logger.info(f"Found {len(scorer_items)} scorers in list format")
+        else:
+            # other format, treat as empty list
+            scorer_items = []
+            logger.warning(f"Unexpected scorer_list format: {type(scorer_list)}, treating as empty")
         
-        for scorer_config_item in scorer_list:
+        for scorer_config_item in scorer_items:
             scorer = self.load_scorer_from_config(scorer_config_item)
             if scorer:
                 scorers.append(scorer)
