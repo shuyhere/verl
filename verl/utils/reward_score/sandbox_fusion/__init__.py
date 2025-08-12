@@ -88,7 +88,6 @@ def compute_score(
             concurrent_semaphore=concurrent_semaphore,
             memory_limit_mb=memory_limit_mb,
         )
-
         # Calculate score
         if not res_list:  # If there are no results (e.g., invalid input)
             return 0.0, metadata_list
@@ -109,7 +108,6 @@ def compute_score(
             total_cases = len(res_list)
             score = passed_count / total_cases if total_cases > 0 else 0.0
             final_metadata = metadata_list
-
     except Exception as e:
         logger.error(f"Error during compute_score: {e}")
         traceback.print_exc()

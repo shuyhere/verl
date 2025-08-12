@@ -90,13 +90,13 @@ def get_function_name(code: str) -> str:
     return "solution"
 
 
-def prepare_code_for_testing(code: str, test_cases: List[dict]) -> str:
+def prepare_code_for_testing(code: str, test_cases: dict = None) -> str:
     """
     Prepare code for testing by wrapping it with input/output handling
     
     Args:
         code: Raw code string
-        test_cases: List of test cases
+        test_cases: Dict with inputs/outputs arrays (new format)
         
     Returns:
         Code wrapped with input/output handling for testing
@@ -110,16 +110,26 @@ def prepare_code_for_testing(code: str, test_cases: List[dict]) -> str:
     # Get function name
     function_name = get_function_name(code)
     
-    # Wrap code with input/output handling
+    # Wrap code with input/output handling that reads from stdin
+    # The input is provided as-is from the test case
     complete_code = f"""import sys
 
 {code}
 
+# Read input from stdin (already formatted from test case)
 input_str = sys.stdin.read().strip()
 result = {function_name}(input_str)
-if isinstance(result, list):
-    print("\\n".join(result) + "\\n")
+
+# Handle different result types
+if isinstance(result, tuple):
+    # For functions that return multiple values, print them space-separated
+    print(' '.join(map(str, result)))
+elif isinstance(result, list):
+    # For functions that return lists, print each item on a new line
+    for item in result:
+        print(item)
 else:
+    # For simple values, print directly
     print(result)
 """
     return complete_code

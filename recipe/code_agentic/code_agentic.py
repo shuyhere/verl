@@ -122,7 +122,6 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
         if not code:
             return "No code provided", 0.0, {"error": "no_code"}
         
-        # Extract code from response using new prompt format
         extracted_code = self._extract_code_from_response(code)
         if extracted_code:
             code = extracted_code
@@ -131,19 +130,62 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
             matches = self.code_pattern.findall(code)
             if matches:
                 code = matches[0].strip()
+            else:
+                # If no pattern matches, check if the input looks like pure code
+                # Look for function definitions, class definitions, or other code patterns
+                if (code.strip().startswith(('def ', 'class ', 'import ', 'from ')) or 
+                    re.search(r'\bdef\s+\w+\s*\(', code) or
+                    re.search(r'\bclass\s+\w+', code)):
+                    # Input appears to be pure code, use it directly
+                    pass  # Keep original code
+                else:
+                    # Try markdown extraction one more time
+                    code = extract_code_from_markdown(code)
         
         code = self._preprocess_code(code)
         timeout = parameters.get("timeout", self.default_timeout)
         language = parameters.get("language", self.default_language)
         
         run_result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
+        # Normalize tool output to text to avoid joining non-str objects later
+        def _normalize_tool_output(output_obj: Any) -> str:
+            try:
+                # Handle ToolResponse objects
+                if hasattr(output_obj, "text"):
+                    text_content = getattr(output_obj, "text")
+                    if text_content is not None:
+                        return str(text_content)
+                    else:
+                        return ""
+                # Handle dict with text field
+                if isinstance(output_obj, dict) and "text" in output_obj:
+                    text_content = output_obj.get("text")
+                    if text_content is not None:
+                        return str(text_content)
+                    else:
+                        return ""
+                # Handle BaseModel objects that might have other fields
+                if hasattr(output_obj, "__dict__"):
+                    obj_dict = getattr(output_obj, "__dict__", {})
+                    if "text" in obj_dict:
+                        text_content = obj_dict.get("text")
+                        if text_content is not None:
+                            return str(text_content)
+                        else:
+                            return ""
+                # Fallback to string conversion
+                return str(output_obj)
+            except Exception as e:
+                logger.warning(f"Failed to normalize tool output: {e}")
+                return ""
+        run_text = _normalize_tool_output(run_result)
         
         test_cases = self.instance_test_cases.get(instance_id, [])
-        
-        #test case format: {'inputs': ['3 4\n1 2 3\n4 5 6\n1 1 1\n0 1 2 3', '5 5\n3 4 6 8 4\n8 3 4 9 3\n10 20 30 40 50\n5 55 13 1000 113', '1 1\n3\n4\n5\n0'], 'outputs': ['2 3 3 3', '2 7 3 7 7', '7']}   
+        # test case format: {"inputs": ["6\nabc\nacb\nbac\nbca\ncab\ncba\n", "1\nabc\n"], "outputs": ["YES\nYES\nYES\nNO\nNO\nYES\n", "YES\n"]}
+        # Each element in inputs/outputs arrays represents one complete test case
         if not test_cases:
             metadata = {
-                "output": run_result,
+                "output": run_text,
                 "score": 0.0,
                 "pass_rate": 0.0,
                 "passed_tests": 0,
@@ -151,15 +193,15 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
                 "failed_tests": [],
                 "execution_result": "computed_without_test_cases"
             }
-            return run_result, 0.0, metadata
+            return run_text, 0.0, metadata
         
         try:
-            processed_code = self._prepare_code_for_testing(code, test_cases)
-            formatted_code = processed_code
-            
-            if not ("```python" in processed_code or "```" in processed_code):
-                formatted_code = f"```python\n{processed_code}\n```"
-            
+            # Extract and clean the code, but don't wrap it for testing
+            # The check_correctness function will handle execution packaging
+            processed_code = self._extract_code_from_response(code) or code
+            processed_code = self._preprocess_code(processed_code)
+
+            formatted_code = f"```python\n{processed_code}\n```"
             _, metadata_list = sandbox_fusion.compute_score(
                 sandbox_fusion_url=self.sandbox_fusion_url,
                 concurrent_semaphore=None,
@@ -168,102 +210,106 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
                 test_cases=test_cases,
                 continuous=True
             )
-            
-            total_samples = 0
-            for input_str in test_cases.get("inputs", []):
-                lines = input_str.strip().split('\n')
-                if lines and lines[0].isdigit():
-                    total_samples += int(lines[0])
-            
-            passed_samples = 0
-            failed_samples = 0
+            # import ipdb; ipdb.set_trace()
+            # Total test cases is simply the length of inputs array  
+            total_test_cases = len(test_cases.get("inputs", []))
+            passed_test_cases = 0
+            failed_test_cases = 0
             passed_tests = []
             failed_tests = []
-            failed_samples_details = [] 
+            failed_test_details = [] 
+            
             for i, meta in enumerate(metadata_list):
+                case_index = meta.get("case_index", i)
                 if meta.get("status") == "success":
-                    input_str = test_cases.get("inputs", [])[meta.get("case_index", 0)]
-                    lines = input_str.strip().split('\n')
-                    if lines and lines[0].isdigit():
-                        test_cases_in_this_input = int(lines[0])
-                        passed_samples += test_cases_in_this_input
-                    
+                    passed_test_cases += 1
                     passed_tests.append({
+                        "case_index": case_index,
                         "stdout": meta.get("stdout", ""),
                         "stderr": meta.get("stderr", ""),
                         "execution_time": meta.get("duration", 0.0)
                     })
                 else:
-                    input_str = test_cases.get("inputs", [])[meta.get("case_index", 0)]
-                    lines = input_str.strip().split('\n')
-                    if lines and lines[0].isdigit():
-                        test_cases_in_this_input = int(lines[0])
-                        failed_samples += test_cases_in_this_input
-                        
-                        if len(failed_samples_details) < 5:
-                            failed_samples_details.append({
-                                "case_index": meta.get("case_index", 0),
-                                "input": input_str,
-                                "expected_output": test_cases.get("outputs", [])[meta.get("case_index", 0)],
-                                "actual_output": meta.get("stdout", ""),
-                                "stderr": meta.get("stderr", ""),
-                                "execution_time": meta.get("duration", 0.0),
-                                "status": meta.get("status", "unknown"),
-                                "error": meta.get("api_request_error", "Unknown error")
-                            })
+                    failed_test_cases += 1
+                    input_str = test_cases.get("inputs", [])[case_index] if case_index < len(test_cases.get("inputs", [])) else ""
+                    expected_output = test_cases.get("outputs", [])[case_index] if case_index < len(test_cases.get("outputs", [])) else ""
+                    
+                    if len(failed_test_details) < 5:
+                        failed_test_details.append({
+                            "case_index": case_index,
+                            "input": input_str,
+                            "expected_output": expected_output,
+                            "actual_output": meta.get("stdout", ""),
+                            "stderr": meta.get("stderr", ""),
+                            "execution_time": meta.get("duration", 0.0),
+                            "status": meta.get("status", "unknown"),
+                            "error": meta.get("api_request_error", "Unknown error")
+                        })
                     
                     failed_test_info = {
+                        "case_index": case_index,
                         "status": meta.get("status", "unknown"),
                         "stdout": meta.get("stdout", ""),
                         "stderr": meta.get("stderr", ""),
                         "execution_time": meta.get("duration", 0.0),
                         "error": meta.get("api_request_error", "Unknown error"),
                         "input": input_str,
-                        "expected_output": test_cases.get("outputs", [])[meta.get("case_index", 0)],
+                        "expected_output": expected_output,
                         "actual_output": meta.get("stdout", "")
                     }
                     failed_tests.append(failed_test_info)
             
-            if total_samples > 0:
-                score = passed_samples / total_samples
+            # Calculate score as pass rate
+            if total_test_cases > 0:
+                score = passed_test_cases / total_test_cases
             else:
                 score = 0.0
             
             metadata = {
                 "score": score,
-                "raw_execution_output": run_result,
+                "pass_rate": score,
+                "raw_execution_output": run_text,
                 "execution_result": "computed_with_sandbox_fusion",
-                "passed_tests": len(passed_tests),
-                "passed_samples": passed_samples,
-                "failed_tests": len(failed_tests),
-                "failed_samples": failed_samples,
-                "failed_samples_details": failed_samples_details, 
+                "passed_tests": passed_test_cases,
+                "failed_tests": failed_test_cases,
+                "total_tests": total_test_cases,
+                "failed_test_details": failed_test_details, 
             }
 
             output_lines = []
-            output_lines.append(f"Output:")
-            output_lines.append(run_result)
+            output_lines.append("Output:")
+            output_lines.append(run_text)
             output_lines.append(f"\nTest Case Evaluation:")
             output_lines.append(f"Score: {score:.3f}")
-            output_lines.append(f"Tests Passed: {passed_samples}/{total_samples}")
-            output_lines.append(f"Failed Tests: {failed_samples}")
-            output_lines.append(f"Failed Samples: {failed_samples_details}")
-            
+            output_lines.append(f"Tests Passed: {passed_test_cases}/{total_test_cases}")
+            output_lines.append(f"Failed Tests: {failed_test_cases}")
+            if failed_test_details:
+                output_lines.append(f"Failed Test Details: {failed_test_details}")
+                
             return "\n".join(output_lines), score, metadata
             
         except Exception as e:
             logger.warning(f"Failed to evaluate test cases: {e}")
+            # More robust total_tests in error path
+            total_tests_in_error = 0
+            try:
+                if isinstance(test_cases, dict):
+                    total_tests_in_error = len(test_cases.get("inputs", []))
+                elif isinstance(test_cases, list):
+                    total_tests_in_error = len(test_cases)
+            except Exception:
+                total_tests_in_error = 0
             metadata = {
-                "output": run_result,
+                "output": run_text,
                 "score": 0.0,
                 "pass_rate": 0.0,
                 "passed_tests": 0,
-                "total_tests": len(test_cases),
+                "total_tests": total_tests_in_error,
                 "failed_tests": [],
                 "execution_result": "computed_with_error",
                 "error": str(e)
             }
-            return f"Code executed successfully:\n{run_result}\n\nTest case evaluation failed: {e}", 0.0, metadata
+            return f"Code executed successfully:\n{run_text}\n\nTest case evaluation failed: {e}", 0.0, metadata
 
 class CodeAgenticDataset(RLHFDataset):
     """Dataset class for enhanced code agentic training with input/output test cases"""
@@ -472,42 +518,51 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
 
     # 2) parse code and run test
     has_code = False
+    looks_like_code = False
+    format_component = 0.0
+    tool_component = 0.0
+    turn_component = 0.0
+    test_component = 0.0
     try:
         code = extract_final_code_from_response(solution_str)
         has_code = bool(code and code.strip())
+        
+        # If extraction failed but input looks like pure code, use it directly
+        if not has_code:
+            if (solution_str.strip().startswith(('def ', 'class ', 'import ', 'from ')) or 
+                re.search(r'\bdef\s+\w+\s*\(', solution_str) or
+                re.search(r'\bclass\s+\w+', solution_str)):
+                code = solution_str.strip()
+                has_code = True
 
-        # try to wrap code for execution
-        wrapped_code = wrap_code_for_execution(code if has_code else solution_str)
+        # Use extracted code or original solution directly
+        # The check_correctness function will handle execution packaging
+        final_code = code if has_code else solution_str
+        
+        # Ensure code is wrapped in markdown fences for compute_score
+        if not ("```python" in final_code or "```" in final_code):
+            final_code = f"```python\n{final_code}\n```"
 
         _, metadata_list = sandbox_fusion.compute_score(
             sandbox_fusion_url="http://10.68.171.9:8080/run_code", # TODO: change to your sandbox fusion url
             concurrent_semaphore=None,
             memory_limit_mb=1024,
-            completion=wrapped_code,
+            completion=final_code,
             test_cases=ground_truth,
             continuous=True,
         )
 
-        # count passed samples
-        total_samples = 0
-        for input_str in ground_truth.get("inputs", []):
-            lines = input_str.strip().split("\n")
-            if lines and lines[0].isdigit():
-                total_samples += int(lines[0])
+        # count passed test cases (each input/output pair is one test case)
+        total_test_cases = len(ground_truth.get("inputs", []))
 
-        passed_samples = 0
+        passed_test_cases = 0
         for meta in metadata_list:
             status = meta.get("status")
-            case_index = meta.get("case_index", 0)
-            input_str = ground_truth.get("inputs", [""])[case_index]
-            lines = input_str.strip().split("\n")
-            if lines and lines[0].isdigit():
-                case_cnt = int(lines[0])
-                if status == "success":
-                    passed_samples += case_cnt
+            if status == "success":
+                passed_test_cases += 1
 
-        if total_samples > 0:
-            pass_rate = passed_samples / total_samples
+        if total_test_cases > 0:
+            pass_rate = passed_test_cases / total_test_cases
         else:
             pass_rate = 0.0
 
@@ -520,10 +575,12 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
     # 3.1 format reward
     if has_code:
         shaped_score += format_reward
+        format_component += format_reward
         # code looks more executable, give a little bonus
         try:
             if re.search(r"\bdef\s+\w+\s*\(", code) or ("if __name__" in code) or ("import " in code):
                 shaped_score += format_bonus_semantic
+                format_component += format_bonus_semantic
         except Exception:
             pass
     else:
@@ -539,6 +596,7 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
             )
             if looks_like_code:
                 shaped_score += format_reward * 0.8
+                format_component += format_reward * 0.8
         except Exception:
             pass
 
@@ -562,12 +620,15 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
     except Exception:
         pass
     shaped_score += tool_reward
+    tool_component += tool_reward
 
     # 3.3 turn reward (positive reward for few turns, negative reward for many turns)
     if num_turns <= 4:
         shaped_score += turn_efficiency_bonus
+        turn_component += turn_efficiency_bonus
     elif num_turns > 10:
         shaped_score -= turn_penalty_many
+        turn_component -= turn_penalty_many
 
     # 3.4 test pass reward: scale up pass rate, and give extra reward for perfect pass
     test_component = pass_rate * test_scale
@@ -582,5 +643,20 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
         "score": float(final_score),
         "data_source": data_source,
         "num_turns": num_turns,
+        "details": {
+            "has_code": bool(has_code),
+            "looks_like_code": bool(looks_like_code),
+            "pass_rate": float(pass_rate),
+            "components": {
+                "format_component": float(format_component),
+                "tool_component": float(tool_component),
+                "turn_component": float(turn_component),
+                "test_component": float(test_component),
+            },
+            "tool_usage": {
+                "num_tool_calls": int(num_tool_calls),
+                "used_tools": used_tools,
+            },
+        },
     }
     return result

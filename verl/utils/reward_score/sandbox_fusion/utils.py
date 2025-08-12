@@ -189,7 +189,38 @@ def _process_single_case(
     logger.info(f"Processing test case {case_index + 1}.")
 
     current_generation_code = generation
-
+    
+    # Auto-extract function name if not provided and language is Python
+    if not fn_name and language == "python":
+        import re
+        
+        # Find all function definitions with their indentation levels
+        lines = generation.split('\n')
+        top_level_functions = []
+        
+        for i, line in enumerate(lines):
+            # Match function definitions and check indentation
+            match = re.match(r'^(\s*)def\s+(\w+)\s*\(', line)
+            if match:
+                indent = len(match.group(1))
+                func_name = match.group(2)
+                
+                # Consider functions with 0 indentation as top-level
+                if indent == 0:
+                    top_level_functions.append((func_name, i))
+        
+        if top_level_functions:
+            # Prefer the first top-level function, or the last one if multiple
+            # This handles cases where there might be helper functions after the main one
+            fn_name = top_level_functions[0][0]  # Take first top-level function
+            logger.info(f"Auto-extracted top-level function name: {fn_name}")
+        else:
+            # Fallback to the old method if no top-level functions found
+            func_matches = re.findall(r'def\s+(\w+)\s*\(', generation)
+            if func_matches:
+                fn_name = func_matches[0]  # Take first function instead of last
+                logger.info(f"Auto-extracted function name (fallback): {fn_name}")
+    
     if fn_name and language == "python":
         # Wrapper assumes stdin_data is a JSON string for function arguments.
         wrapper_code = f"""
@@ -240,12 +271,81 @@ def _execute_user_function():
     _raw_input_str = sys.stdin.read()
     _args = []
     if _raw_input_str.strip(): # If there's input
-        try:
-            _args = [json.loads(line) for line in _raw_input_str.split('\\n')]
-        except json.JSONDecodeError as _je:
-            sys.stderr.write(f"WrapperError: Invalid JSON input for '{{_SANDBOX_FN_NAME}}': {{_je}}\\nInput was: "
-                              f"{{_raw_input_str[:200]}}\\n")
-            return None, True # result, error_occurred
+        # Parse input intelligently based on structure
+        lines = _raw_input_str.strip().split('\n')
+        
+        if len(lines) >= 2 and lines[0].strip().isdigit():
+            # Looks like: n followed by n lines of data
+            n = int(lines[0].strip())
+            if len(lines) == n + 1:
+                # This pattern: n followed by exactly n lines
+                _args.append(n)
+                picture_lines = [lines[i+1].strip() for i in range(n)]
+                _args.append(picture_lines)
+            else:
+                # Fall back to parsing each line individually
+                _args = []
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Check if line contains space-separated values
+                    parts = line.split()
+                    if len(parts) > 1:
+                        # Multiple values in one line - parse each separately
+                        for part in parts:
+                            part = part.strip()
+                            if part.isdigit() or (part.startswith('-') and part[1:].isdigit()):
+                                _args.append(int(part))
+                            else:
+                                try:
+                                    if '.' in part:
+                                        _args.append(float(part))
+                                    else:
+                                        _args.append(part)
+                                except ValueError:
+                                    _args.append(part)
+                    else:
+                        # Single value in the line
+                        if line.isdigit() or (line.startswith('-') and line[1:].isdigit()):
+                            _args.append(int(line))
+                        else:
+                            _args.append(line)
+        else:
+            # Fall back to parsing each line individually
+            _args = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check if line contains space-separated values
+                parts = line.split()
+                if len(parts) > 1:
+                    # Multiple values in one line - parse each separately
+                    for part in parts:
+                        part = part.strip()
+                        if part.isdigit() or (part.startswith('-') and part[1:].isdigit()):
+                            _args.append(int(part))
+                        else:
+                            try:
+                                if '.' in part:
+                                    _args.append(float(part))
+                                else:
+                                    _args.append(part)
+                            except ValueError:
+                                _args.append(part)
+                else:
+                    # Single value in the line
+                    if line.isdigit() or (line.startswith('-') and line[1:].isdigit()):
+                        _args.append(int(line))
+                    else:
+                        _args.append(line)
+        
+        # If no arguments were parsed, fallback to the original string
+        if not _args:
+            _args = [_raw_input_str.strip()]
 
     # --- Function Location and Execution ---
     try:
@@ -289,7 +389,11 @@ if __name__ == '__main__':
     #    sys.exit(1)
 """
         current_generation_code = wrapper_code
-
+    else:
+        # If no function name found or not Python, use original code
+        current_generation_code = generation
+    
+    print("===stdin_data===", stdin_data)
     stdin = None if stdin_data is None else str(stdin_data)
     try:
         if concurrent_semaphore:
@@ -320,7 +424,7 @@ if __name__ == '__main__':
         error_msg = f"API Request Exception during check_correctness for case {case_index + 1}: {e}"
         logger.error(f"Case {case_index + 1}: {error_msg}")
         traceback.print_exc()
-
+        
     metadata = {
         "case_index": case_index,
         "input": stdin,
@@ -474,16 +578,20 @@ def check_correctness(
         metadata_list: A list containing metadata dictionaries for each test case,
                        ordered corresponding to the inputs.
     """
+    print("=== ENTERING check_correctness function ===")
     logger.info("Starting correctness check for generation.")
+    # import ipdb; ipdb.set_trace()
 
     if not in_outs or "inputs" not in in_outs or "outputs" not in in_outs:
         logger.warning("Invalid in_outs format provided.")
         return [-1], [{"error": "Invalid input/output data"}]
-
+    
     inputs = in_outs["inputs"]
     expected_outputs = in_outs["outputs"]
     fn_name = in_outs.get("fn_name")
     num_cases = len(inputs)
+    print(f"=== check_correctness: num_cases = {num_cases}, inputs = {inputs[:3]}... ===")  
+    
     assert_cases = in_outs.get("assert_case", [""] * num_cases)  # Default to empty strings if not provided
     results = [None] * num_cases  # Initialize with placeholders
     metadata_list = [None] * num_cases  # Initialize with placeholders
@@ -507,10 +615,13 @@ def check_correctness(
     first_compile_error_index = -1
 
     # max_workers is limited by sandbox_fusion_max_concurrent from concurrent_semaphore
+    print("=== REACHED LINE 525: About to create ThreadPoolExecutor ===")
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(32, os.cpu_count() * 5)) as executor:
         # Submit all tasks, passing the concurrent_semaphore to _process_single_case
-        future_to_index = {
-            executor.submit(
+        future_to_index = {}
+        for i, stdin_data in enumerate(inputs):
+            print(f"=== Submitting case {i}: stdin_data = {repr(stdin_data)} ===")
+            future = executor.submit(
                 _process_single_case,
                 i,
                 stdin_data,
@@ -522,9 +633,8 @@ def check_correctness(
                 language,
                 concurrent_semaphore,
                 fn_name,
-            ): i
-            for i, stdin_data in enumerate(inputs)
-        }
+            )
+            future_to_index[future] = i
 
         # Process results as they complete
         for future in concurrent.futures.as_completed(future_to_index):
