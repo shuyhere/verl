@@ -266,6 +266,7 @@ class AsyncvLLMServer(AsyncServerBase):
             disable_custom_all_reduce=True,
             skip_tokenizer_init=False,
             max_model_len=self.max_model_len,
+            max_num_seqs=config.max_num_seqs,
             load_format="auto",
             disable_log_stats=config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
@@ -327,7 +328,16 @@ class AsyncvLLMServer(AsyncServerBase):
             assert isinstance(generator, ChatCompletionResponse)
             return JSONResponse(content=generator.model_dump())
 
-    async def generate(self, prompt_ids: list[int], sampling_params: dict[str, Any], request_id: str) -> list[int]:
+    async def generate(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+    ) -> list[int]:
+        # TODO: vllm image_data surportting like sglang async server
+        if image_data is not None:
+            raise NotImplementedError("image_data is not supported for vLLM rollout")
         max_tokens = self.max_model_len - len(prompt_ids)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt = TokensPrompt(prompt_token_ids=prompt_ids)
