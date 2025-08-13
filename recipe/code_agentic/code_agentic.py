@@ -1,0 +1,662 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import logging
+import re
+import json
+import asyncio
+from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
+from uuid import uuid4
+
+import datasets
+from omegaconf import OmegaConf
+
+from verl.tools.base_tool import OpenAIFunctionToolSchema
+from verl.tools.sandbox_fusion_tools import SandboxFusionTool
+from verl.utils.dataset import RLHFDataset
+from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.reward_score import sandbox_fusion
+from recipe.code_agentic.code_agentic_utils import *
+
+logger = logging.getLogger(__name__)
+
+
+class TestResult(Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+
+
+@dataclass
+class TestCase:
+    """Represents a test case with input and expected output"""
+    input_data: str
+    expected_output: str
+    test_id: str = ""
+
+
+@dataclass
+class CodeExecutionResult:
+    """Result of code execution with test case validation"""
+    success: bool
+    output: str
+    test_result: TestResult
+    error_message: Optional[str] = None
+    execution_time: float = 0.0
+    debug_info: Dict[str, Any] = None
+
+
+class SandboxFusionTestCaseTool(SandboxFusionTool):
+    """Enhanced code execution tool with input/output test case validation"""
+    
+    def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
+        super().__init__(config, tool_schema)
+        self.code_pattern = extract_code_pattern()
+        self.max_debug_attempts = 5
+        self.debug_history: List[Dict[str, Any]] = []
+        self.instance_test_cases: Dict[str, List[dict]] = {}
+    
+    def _preprocess_code(self, code: str) -> str:
+        """Preprocess code to fix common syntax errors"""
+        return preprocess_code(code)
+    
+    def _prepare_code_for_testing(self, code: str, test_cases: List[dict]) -> str:
+        return prepare_code_for_testing(code, test_cases)
+    
+    def _extract_code_from_response(self, response: str) -> str:
+        """
+        Extract code from model response using the new prompt format
+        
+        Args:
+            response: Model response text
+            
+        Returns:
+            Extracted code
+        """
+        return extract_final_code_from_response(response)
+    
+    
+    async def create(self, instance_id: Optional[str] = None, ground_truth: Optional[dict] = None, **kwargs) -> str:
+        if instance_id is None:
+            instance_id = str(uuid4())
+            
+        if ground_truth is None and "ground_truth" in kwargs:
+            ground_truth = kwargs["ground_truth"]
+            
+        self._instance_dict[instance_id] = {
+            "response": "",
+            "ground_truth": ground_truth,
+            "reward": [],
+        }
+        if ground_truth is not None:
+            self.instance_test_cases[instance_id] = ground_truth
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Stored ground_truth for instance_id {instance_id}: {len(ground_truth)} cases")
+        else:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"No ground_truth provided for instance_id {instance_id}")
+                
+        return instance_id
+
+
+    @rollout_trace_op
+    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs) -> tuple[str, float, dict]:
+        """Execute code and return execution result with test case validation"""
+        
+
+        code = parameters.get("code", "")
+        if not code:
+            return "No code provided", 0.0, {"error": "no_code"}
+        
+        extracted_code = self._extract_code_from_response(code)
+        if extracted_code:
+            code = extracted_code
+        else:
+            # Fallback to traditional markdown extraction
+            matches = self.code_pattern.findall(code)
+            if matches:
+                code = matches[0].strip()
+            else:
+                # If no pattern matches, check if the input looks like pure code
+                # Look for function definitions, class definitions, or other code patterns
+                if (code.strip().startswith(('def ', 'class ', 'import ', 'from ')) or 
+                    re.search(r'\bdef\s+\w+\s*\(', code) or
+                    re.search(r'\bclass\s+\w+', code)):
+                    # Input appears to be pure code, use it directly
+                    pass  # Keep original code
+                else:
+                    # Try markdown extraction one more time
+                    code = extract_code_from_markdown(code)
+        
+        code = self._preprocess_code(code)
+        timeout = parameters.get("timeout", self.default_timeout)
+        language = parameters.get("language", self.default_language)
+        
+        run_result = await self.execution_pool.execute.remote(self.execute_code, instance_id, code, timeout, language)
+        # Normalize tool output to text to avoid joining non-str objects later
+        def _normalize_tool_output(output_obj: Any) -> str:
+            try:
+                # Handle ToolResponse objects
+                if hasattr(output_obj, "text"):
+                    text_content = getattr(output_obj, "text")
+                    if text_content is not None:
+                        return str(text_content)
+                    else:
+                        return ""
+                # Handle dict with text field
+                if isinstance(output_obj, dict) and "text" in output_obj:
+                    text_content = output_obj.get("text")
+                    if text_content is not None:
+                        return str(text_content)
+                    else:
+                        return ""
+                # Handle BaseModel objects that might have other fields
+                if hasattr(output_obj, "__dict__"):
+                    obj_dict = getattr(output_obj, "__dict__", {})
+                    if "text" in obj_dict:
+                        text_content = obj_dict.get("text")
+                        if text_content is not None:
+                            return str(text_content)
+                        else:
+                            return ""
+                # Fallback to string conversion
+                return str(output_obj)
+            except Exception as e:
+                logger.warning(f"Failed to normalize tool output: {e}")
+                return ""
+        run_text = _normalize_tool_output(run_result)
+        
+        test_cases = self.instance_test_cases.get(instance_id, [])
+        # test case format: {"inputs": ["6\nabc\nacb\nbac\nbca\ncab\ncba\n", "1\nabc\n"], "outputs": ["YES\nYES\nYES\nNO\nNO\nYES\n", "YES\n"]}
+        # Each element in inputs/outputs arrays represents one complete test case
+        if not test_cases:
+            metadata = {
+                "output": run_text,
+                "score": 0.0,
+                "pass_rate": 0.0,
+                "passed_tests": 0,
+                "total_tests": 0,
+                "failed_tests": [],
+                "execution_result": "computed_without_test_cases"
+            }
+            return run_text, 0.0, metadata
+        
+        try:
+            # Extract and clean the code, but don't wrap it for testing
+            # The check_correctness function will handle execution packaging
+            processed_code = self._extract_code_from_response(code) or code
+            processed_code = self._preprocess_code(processed_code)
+
+            formatted_code = f"```python\n{processed_code}\n```"
+            _, metadata_list = sandbox_fusion.compute_score(
+                sandbox_fusion_url=self.sandbox_fusion_url,
+                concurrent_semaphore=None,
+                memory_limit_mb=self.memory_limit_mb,
+                completion=formatted_code,
+                test_cases=test_cases,
+                continuous=True
+            )
+            # import ipdb; ipdb.set_trace()
+            # Total test cases is simply the length of inputs array  
+            total_test_cases = len(test_cases.get("inputs", []))
+            passed_test_cases = 0
+            failed_test_cases = 0
+            passed_tests = []
+            failed_tests = []
+            failed_test_details = [] 
+            
+            for i, meta in enumerate(metadata_list):
+                case_index = meta.get("case_index", i)
+                if meta.get("status") == "success":
+                    passed_test_cases += 1
+                    passed_tests.append({
+                        "case_index": case_index,
+                        "stdout": meta.get("stdout", ""),
+                        "stderr": meta.get("stderr", ""),
+                        "execution_time": meta.get("duration", 0.0)
+                    })
+                else:
+                    failed_test_cases += 1
+                    input_str = test_cases.get("inputs", [])[case_index] if case_index < len(test_cases.get("inputs", [])) else ""
+                    expected_output = test_cases.get("outputs", [])[case_index] if case_index < len(test_cases.get("outputs", [])) else ""
+                    
+                    if len(failed_test_details) < 5:
+                        failed_test_details.append({
+                            "case_index": case_index,
+                            "input": input_str,
+                            "expected_output": expected_output,
+                            "actual_output": meta.get("stdout", ""),
+                            "stderr": meta.get("stderr", ""),
+                            "execution_time": meta.get("duration", 0.0),
+                            "status": meta.get("status", "unknown"),
+                            "error": meta.get("api_request_error", "Unknown error")
+                        })
+                    
+                    failed_test_info = {
+                        "case_index": case_index,
+                        "status": meta.get("status", "unknown"),
+                        "stdout": meta.get("stdout", ""),
+                        "stderr": meta.get("stderr", ""),
+                        "execution_time": meta.get("duration", 0.0),
+                        "error": meta.get("api_request_error", "Unknown error"),
+                        "input": input_str,
+                        "expected_output": expected_output,
+                        "actual_output": meta.get("stdout", "")
+                    }
+                    failed_tests.append(failed_test_info)
+            
+            # Calculate score as pass rate
+            if total_test_cases > 0:
+                score = passed_test_cases / total_test_cases
+            else:
+                score = 0.0
+            
+            metadata = {
+                "score": score,
+                "pass_rate": score,
+                "raw_execution_output": run_text,
+                "execution_result": "computed_with_sandbox_fusion",
+                "passed_tests": passed_test_cases,
+                "failed_tests": failed_test_cases,
+                "total_tests": total_test_cases,
+                "failed_test_details": failed_test_details, 
+            }
+
+            output_lines = []
+            output_lines.append("Output:")
+            output_lines.append(run_text)
+            output_lines.append(f"\nTest Case Evaluation:")
+            output_lines.append(f"Score: {score:.3f}")
+            output_lines.append(f"Tests Passed: {passed_test_cases}/{total_test_cases}")
+            output_lines.append(f"Failed Tests: {failed_test_cases}")
+            if failed_test_details:
+                output_lines.append(f"Failed Test Details: {failed_test_details}")
+                
+            return "\n".join(output_lines), score, metadata
+            
+        except Exception as e:
+            logger.warning(f"Failed to evaluate test cases: {e}")
+            # More robust total_tests in error path
+            total_tests_in_error = 0
+            try:
+                if isinstance(test_cases, dict):
+                    total_tests_in_error = len(test_cases.get("inputs", []))
+                elif isinstance(test_cases, list):
+                    total_tests_in_error = len(test_cases)
+            except Exception:
+                total_tests_in_error = 0
+            metadata = {
+                "output": run_text,
+                "score": 0.0,
+                "pass_rate": 0.0,
+                "passed_tests": 0,
+                "total_tests": total_tests_in_error,
+                "failed_tests": [],
+                "execution_result": "computed_with_error",
+                "error": str(e)
+            }
+            return f"Code executed successfully:\n{run_text}\n\nTest case evaluation failed: {e}", 0.0, metadata
+
+class CodeAgenticDataset(RLHFDataset):
+    """Dataset class for enhanced code agentic training with input/output test cases"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+    def _read_files_and_tokenize(self):
+        """Load and process dataset files"""
+        dataframes = []
+        
+        for data_file in self.data_files:
+            dataframe = None
+            
+            try:
+                dataset = datasets.load_dataset(data_file)
+                if "train" in dataset:
+                    dataframe = dataset["train"]
+                else:
+                    dataframe = list(dataset.values())[0]  # Take first split
+            except Exception as e:
+                try:
+                    dataset = datasets.load_dataset("json", data_files=data_file)
+                    if "train" in dataset:
+                        dataframe = dataset["train"]
+                    else:
+                        dataframe = list(dataset.values())[0]  # Take first split
+                except Exception as e2:
+                    print(f"Failed to load {data_file} as parquet: {e}")
+                    print(f"Failed to load {data_file} as JSONL: {e2}")
+                    continue
+            
+            if dataframe is None:
+                print(f"Could not load dataframe from {data_file}")
+                continue
+            
+            print(f"Original dataset size: {len(dataframe)}")
+            
+            def filter_large_samples(example):
+                """filter out large samples"""
+                question = example.get("question", [""])[0] if isinstance(example.get("question"), list) else example.get("question", "")
+                input_output = example.get("input_output", [""])[0] if isinstance(example.get("input_output"), list) else example.get("input_output", "")
+                
+                # check question size
+                if len(str(question)) > 50000:
+                    return False
+                
+                # check input output size
+                if len(str(input_output)) > 100000:
+                    return False
+                
+                # try to parse input_output and check test case size
+                if isinstance(input_output, str):
+                    try:
+                        import json
+                        parsed = json.loads(input_output)
+                        inputs = parsed.get("inputs", [])
+                        outputs = parsed.get("outputs", [])
+                        
+                        # check total input output size
+                        total_input_size = sum(len(str(inp)) for inp in inputs)
+                        total_output_size = sum(len(str(out)) for out in outputs)
+                        
+                        if total_input_size > 200000 or total_output_size > 200000:
+                            return False
+                            
+                    except (json.JSONDecodeError, Exception):
+                        # if parse failed, check original string size
+                        if len(input_output) > 100000:
+                            return False
+                
+                return True
+            
+            # apply filter
+            dataframe = dataframe.filter(filter_large_samples)
+            print(f"After filtering large samples: {len(dataframe)}")
+            
+            # NOTE: Limit to 1% of data for debugging
+            # debug_size = max(256, int(len(dataframe) * 0.01))
+            # dataframe = dataframe.select(range(min(debug_size, len(dataframe))))
+            
+            data_source = "/".join(data_file.split("/")[-1:])
+            # NOTE: you can add more data source and map_fn
+            if data_source in ["codeforces"]:
+                dataframe = dataframe.map(self.map_fn, remove_columns=dataframe.column_names, fn_kwargs={"data_source": data_source})
+            else:
+                dataframe = dataframe.map(self.map_fn, num_proc=1, fn_kwargs={"data_source": data_source})
+            
+            dataframes.append(dataframe)
+        
+        if not dataframes:
+            raise ValueError("No valid data files could be loaded")
+        
+        self.dataframe = datasets.concatenate_datasets(dataframes)
+        print(f"Dataset loaded with {len(self.dataframe)} samples")
+        print(self.dataframe[0])
+        
+    
+    def map_fn(self, row: dict, data_source: str = "code_agentic"):
+        """Map dataset row to training format with code agentic prompt"""
+        
+        import os
+        worker_id = os.getpid()
+        
+        question = row.get("question", [""])[0] if isinstance(row.get("question"), list) else row.get("question", "")
+        input_output = row.get("input_output", [""])[0] if isinstance(row.get("input_output"), list) else row.get("input_output", "")
+        
+        question_size = len(str(question))
+        input_output_size = len(str(input_output))
+        
+        if question_size > 10000 or input_output_size > 10000:
+            print(f"WARNING: Large data detected at worker {worker_id}")
+            print(f"  question_size: {question_size}")
+            print(f"  input_output_size: {input_output_size}")
+            print(f"  question preview: {str(question)[:200]}...")
+            print(f"  input_output preview: {str(input_output)[:200]}...")
+        
+        prompt_content = get_code_problem_prompt(question)
+        answer_format = get_answer_format()
+        if isinstance(input_output, str):
+            try:
+                import json
+                input_output = json.loads(input_output)
+            except:
+                input_output = {}
+        
+        inputs = input_output.get("inputs", [])
+        outputs = input_output.get("outputs", [])
+        
+        total_input_size = sum(len(str(inp)) for inp in inputs)
+        total_output_size = sum(len(str(out)) for out in outputs)
+        
+        if total_input_size > 50000 or total_output_size > 50000:
+            print(f"WARNING: Very large test cases detected at worker {worker_id}")
+            print(f"  total_input_size: {total_input_size}")
+            print(f"  total_output_size: {total_output_size}")
+            print(f"  num_inputs: {len(inputs)}")
+            print(f"  num_outputs: {len(outputs)}")
+        
+        # Create test cases in the format expected by prime_code
+        test_cases_dict = {
+            "inputs": inputs,
+            "outputs": outputs
+        }
+        
+        # Also create the detailed format for our custom tool
+        test_cases_detailed = []
+        for i, (input_data, expected_output) in enumerate(zip(inputs, outputs)):
+            test_case = {
+                "input_data": input_data,
+                "expected_output": expected_output,
+                "test_id": f"test_{i}"
+            }
+            test_cases_detailed.append(test_case)
+
+        result = {
+            "prompt": [{"role": "user", "content": prompt_content+answer_format}],
+            "ability": "CODE_DEBUG",
+            "reward_model": {"ground_truth": test_cases_dict},  
+            "agent_name": "tool_agent",
+            "question": question,
+            "input_output": input_output,
+            "data_source": data_source,
+            "extra_info": {
+                "need_tools_kwargs": True,
+                "tools_kwargs": {
+                    "code_interpreter": {
+                        "create_kwargs": {"ground_truth": test_cases_dict},
+                    },
+                },
+            }
+        }
+        
+        result_size = len(str(result))
+        if result_size > 100000:
+            print(f"WARNING: Very large result data at worker {worker_id}: {result_size} chars")
+        
+        return result
+        
+
+
+def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, extra_info: dict) -> dict:
+    """for code agentic:
+    1) format reward: if can extract code, give positive reward;
+    2) tool usage reward: give reward based on tool calls/types;
+    3) test pass reward: scale up pass rate, and give extra reward for perfect pass;
+    4) final score clipped to [0, 1].
+    """
+
+    # 1) default values and weights
+    pass_rate = 0.0
+    num_turns = int(extra_info.get("num_turns", 1) or 1)
+
+    format_reward = 0.10           # code extraction reward
+    format_bonus_semantic = 0.05   # code looks more executable (def/import/main)
+    tool_unit_reward = 0.03        # single tool call reward
+    tool_reward_cap = 0.20         # tool call reward cap
+    tool_bonus_code_interpreter = 0.05  # extra reward for using code interpreter etc.
+
+    turn_efficiency_bonus = 0.05   # positive reward for 2 turns
+    turn_penalty_many = 0.05       # negative reward for many turns
+
+    test_scale = 1.20              # scale up pass rate
+    perfect_bonus = 0.20           # extra reward for perfect pass
+    mid_bonus = 0.05               # extra reward for pass rate > 0.5
+
+    # 2) parse code and run test
+    has_code = False
+    looks_like_code = False
+    format_component = 0.0
+    tool_component = 0.0
+    turn_component = 0.0
+    test_component = 0.0
+    try:
+        code = extract_final_code_from_response(solution_str)
+        has_code = bool(code and code.strip())
+        
+        # If extraction failed but input looks like pure code, use it directly
+        if not has_code:
+            if (solution_str.strip().startswith(('def ', 'class ', 'import ', 'from ')) or 
+                re.search(r'\bdef\s+\w+\s*\(', solution_str) or
+                re.search(r'\bclass\s+\w+', solution_str)):
+                code = solution_str.strip()
+                has_code = True
+
+        # Use extracted code or original solution directly
+        # The check_correctness function will handle execution packaging
+        final_code = code if has_code else solution_str
+        
+        # Ensure code is wrapped in markdown fences for compute_score
+        if not ("```python" in final_code or "```" in final_code):
+            final_code = f"```python\n{final_code}\n```"
+
+        _, metadata_list = sandbox_fusion.compute_score(
+            sandbox_fusion_url="http://10.68.171.9:8080/run_code", # TODO: change to your sandbox fusion url
+            concurrent_semaphore=None,
+            memory_limit_mb=1024,
+            completion=final_code,
+            test_cases=ground_truth,
+            continuous=True,
+        )
+
+        # count passed test cases (each input/output pair is one test case)
+        total_test_cases = len(ground_truth.get("inputs", []))
+
+        passed_test_cases = 0
+        for meta in metadata_list:
+            status = meta.get("status")
+            if status == "success":
+                passed_test_cases += 1
+
+        if total_test_cases > 0:
+            pass_rate = passed_test_cases / total_test_cases
+        else:
+            pass_rate = 0.0
+
+    except Exception as e:
+        logger.warning(f"Failed to evaluate test cases: {e}")
+
+    # 3) reward shaping: format, tool, turn, test pass
+    shaped_score = 0.0
+
+    # 3.1 format reward
+    if has_code:
+        shaped_score += format_reward
+        format_component += format_reward
+        # code looks more executable, give a little bonus
+        try:
+            if re.search(r"\bdef\s+\w+\s*\(", code) or ("if __name__" in code) or ("import " in code):
+                shaped_score += format_bonus_semantic
+                format_component += format_bonus_semantic
+        except Exception:
+            pass
+    else:
+        # if code extraction failed, use original string for lightweight structure check, if looks like code, give basic reward
+        try:
+            raw = solution_str or ""
+            looks_like_code = (
+                ("```" in raw)
+                or re.search(r"\bdef\s+\w+\s*\(", raw)
+                or ("#include" in raw)
+                or ("class " in raw)
+                or ("import " in raw)
+            )
+            if looks_like_code:
+                shaped_score += format_reward * 0.8
+                format_component += format_reward * 0.8
+        except Exception:
+            pass
+
+    # 3.2 tool call reward
+    num_tool_calls = int(
+        extra_info.get("num_tool_calls")
+        or extra_info.get("tool_calls")
+        or 0
+    )
+    used_tools = extra_info.get("used_tools") or []
+    try:
+        tool_reward = min(tool_reward_cap, max(0, num_tool_calls) * tool_unit_reward)
+    except Exception:
+        tool_reward = 0.0
+    # if contains code interpreter / code tool, give a little bonus
+    try:
+        if isinstance(used_tools, list) and any(
+            isinstance(t, str) and ("code" in t.lower() or "interpreter" in t.lower()) for t in used_tools
+        ):
+            tool_reward += tool_bonus_code_interpreter
+    except Exception:
+        pass
+    shaped_score += tool_reward
+    tool_component += tool_reward
+
+    # 3.3 turn reward (positive reward for few turns, negative reward for many turns)
+    if num_turns <= 4:
+        shaped_score += turn_efficiency_bonus
+        turn_component += turn_efficiency_bonus
+    elif num_turns > 10:
+        shaped_score -= turn_penalty_many
+        turn_component -= turn_penalty_many
+
+    # 3.4 test pass reward: scale up pass rate, and give extra reward for perfect pass
+    test_component = pass_rate * test_scale
+    if pass_rate >= 1.0:
+        test_component += perfect_bonus
+    elif pass_rate >= 0.5:
+        test_component += mid_bonus
+
+    final_score = max(0.0, min(1.0, shaped_score + test_component))
+
+    result = {
+        "score": float(final_score),
+        "data_source": data_source,
+        "num_turns": num_turns,
+        "details": {
+            "has_code": bool(has_code),
+            "looks_like_code": bool(looks_like_code),
+            "pass_rate": float(pass_rate),
+            "components": {
+                "format_component": float(format_component),
+                "tool_component": float(tool_component),
+                "turn_component": float(turn_component),
+                "test_component": float(test_component),
+            },
+            "tool_usage": {
+                "num_tool_calls": int(num_tool_calls),
+                "used_tools": used_tools,
+            },
+        },
+    }
+    return result

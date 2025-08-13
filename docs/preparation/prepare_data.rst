@@ -1,5 +1,7 @@
-Prepare Data (Parquet) for Post-Training
+Prepare Data for Post-Training
 ========================================
+
+Last updated: 02/09/2025.
 
 Before starting the post-training job, we need to prepare the data for
 the policy training. The data should be stored in the parquet format.
@@ -10,7 +12,7 @@ to follow the following steps: The data preprocess script can be divided
 into two parts:
 
 1. The first part is the common part, which loads the dataset from
-   huggingface’s ``datasets`` package. Then preprocess the datasets with
+   huggingface's ``datasets`` package. Then preprocess the datasets with
    the ``make_map_fn`` and then store in the parquet format.
 
 .. code:: python
@@ -30,7 +32,7 @@ into two parts:
    if __name__ == '__main__':
        parser = argparse.ArgumentParser()
        parser.add_argument('--local_dir', default='/opt/tiger/gsm8k')
-       parser.add_argument('--hdfs_dir', default='hdfs://haruna/home/byte_data_seed/lf_lq/user/zhangchi.usc1992/data/rlhf')
+       parser.add_argument('--hdfs_dir', default=None)
 
        args = parser.parse_args()
 
@@ -71,7 +73,7 @@ In the ``make_map_fn``, each data field should consist of the following
 5 fields:
 
 1. ``data_source``: The name of the dataset. To index the corresponding
-   reward function in the ``RewardModule``
+   reward function in the ``RewardModel``
 2. ``prompt``: This field should be constructed in the format of
    huggingface chat_template. The tokenizer in ``RLHFDataset`` will
    apply chat template and tokenize the prompt.

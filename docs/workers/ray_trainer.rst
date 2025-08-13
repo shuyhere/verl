@@ -1,6 +1,8 @@
 PPO Ray Trainer
 ===============
 
+Last updated: 02/12/2025.
+
 We implement the RayPPOTrainer, which is a trainer runs on the driver
 process on a single CPU/GPU node (default is CPU).
 
@@ -12,7 +14,7 @@ Data Preparation
 
 The ``PPORayTrainer``, as a single process, is responsible for loading a
 complete batch of samples (prompts) from the dataset and then dispatch
-to different worker_groups runnning on different GPUs.
+to different worker_groups running on different GPUs.
 
 To generalize the data loading, we implement the ``RLHFDataset`` class
 to load the preprocessed parquet files, apply chat templates to the
@@ -21,13 +23,9 @@ then tokenize.
 
 .. code:: python
 
-   self.train_dataset = RLHFDataset(parquet_files=self.config.data.train_files,
+   self.train_dataset = RLHFDataset(data_files=self.config.data.train_files,
                                        tokenizer=self.tokenizer,
-                                       prompt_key=self.config.data.prompt_key,
-                                       max_prompt_length=self.config.data.max_prompt_length,
-                                       filter_prompts=True,
-                                       return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                       truncation='error')
+                                       config=self.config.data)
 
 Then, the dataloader will iterate the dataset under PPO mini batch size.
 
@@ -39,9 +37,9 @@ We first introduce a basic implementation of initializing the
 
 .. code:: python
 
-   # Due to the Ray issue, we can only support max_colocate_count=1 for now.
-   # This means that each GPU can only have one process.
-   # We can support max_colocate > 1 when applying this pull request: https://github.com/ray-project/ray/pull/44385
+   # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
+   # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
+   # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for differnt models
    resource_pool = RayResourcePool(process_on_nodes=[config.trainer.n_gpus_per_node] * config.trainer.nnodes,
                                    use_gpu=True,
                                    max_colocate_count=1)
@@ -94,7 +92,7 @@ CUDA/distributed context in different processes.
    self.actor_rollout_wg = all_wg['actor_rollout']
    self.actor_rollout_wg.init_model()
 
-.. note:: For megatron backend, if we merge the ``worker_groups`` into the same processes, all the roles will utilize the same 3D parallel size. To optimize this, we may need to maintain several 3D process groups for each role in the same distributed context. If you want to use different 3D parallel size for different roles, please follow the similar architecture of the first code block to initialize each role’s ``worker_group``
+.. note:: For megatron backend, if we merge the ``worker_groups`` into the same processes, all the roles will utilize the same 3D parallel size. To optimize this, we may need to maintain several 3D process groups for each role in the same distributed context. If you want to use different 3D parallel size for different roles, please follow the similar architecture of the first code block to initialize each role's ``worker_group``
 
 
 PPO Training Loop
@@ -104,7 +102,7 @@ We implement the PPO training loop by calling the functions in
 worker_group of each role. The input and output data of each function is
 a ``DataProto`` object implemented in `protocol.py <https://github.com/volcengine/verl/blob/main/verl/protocol.py>`_. In the training
 loop, trainer will dispatch/collect the data to/from different GPUs
-following the transfer protocols wrapped in the workers’ functions. The
+following the transfer protocols wrapped in the workers' functions. The
 computation of PPO micro batches is processed in ``update_actor`` and
 ``update_critic`` functions.
 
@@ -180,7 +178,7 @@ To extend to other RLHF algorithms, such as DPO, GRPO, please refer to
 
                    # compute rewards. apply_kl_penalty if available
                    batch, kl_metrics = apply_kl_penalty(batch,
-                                                           kl_ctrl=self.kl_ctrl,
+                                                           kl_ctrl=self.kl_ctrl_in_reward,
                                                            kl_penalty=self.config.algorithm.kl_penalty)
                    metrics.update(kl_metrics)
 

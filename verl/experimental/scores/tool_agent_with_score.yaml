@@ -1,0 +1,21 @@
+actor_rollout_ref:
+  rollout:
+    trace:
+      backend: "weave"
+      token2text: true
+      scorers:
+        enabled: true
+        scorer_list:
+          - name: "hallucination"
+            type: "hallucination"
+            model: "gpt-4o-mini"
+            enabled: true
+          - name: "factual_accuracy"
+            type: "factual_accuracy"
+            enabled: true
+          - name: "response_length"
+            type: "response_length"
+            min_length: 20
+            max_length: 500
+            enabled: true
+```

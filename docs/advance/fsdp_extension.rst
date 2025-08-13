@@ -1,17 +1,19 @@
 
-Add models to FSDP backend
-===========================
+Add models with the FSDP backend
+==================================
+
+Last updated: 02/09/2025.
 
 Model
 --------------------------
 
 In principle, our FSDP backend can support any HF model and we can
-sychronoize the actor model weight with vLLM using `hf_weight_loader.py <https://github.com/volcengine/verl/blob/main/verl/third_party/vllm/vllm_v_0_5_4/hf_weight_loader.py>`_.
+sychronoize the actor model weight with vLLM using `hf_weight_loader.py` under `third_party/vllm`.
 However, ``hf_weight_loader`` is will gather the full state_dict of a
 model during synchronization, which may cause OOM. We suggest using
 ``dtensor_weight_loader`` which gather the full model parameter layer by
 layer to reduce the peak memory usage. We already support dtensor weight
-loader for the models below in `dtensor_weight_loader.py <https://github.com/volcengine/verl/blob/main/verl/third_party/vllm/vllm_v_0_5_4/dtensor_weight_loader.py>`_.:
+loader for the models below in `dtensor_weight_loader.py` under `third_party/vllm`:
 
 - ``GPT2LMHeadModel``
 - ``LlamaForCausalLM``
@@ -28,7 +30,7 @@ loader for the models below in `dtensor_weight_loader.py <https://github.com/vol
 - ``Qwen2ForCausalLM``
 - ``DeepseekV2ForCausalLM``
 
-To implement ``dtensor_weight_loader`` of a model that’s supported in
+To implement ``dtensor_weight_loader`` of a model that's supported in
 vLLM, follow the guide of gemma model below:
 
 1. Copy the
@@ -85,7 +87,8 @@ vLLM, follow the guide of gemma model below:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+    -           weight_loader(param, loaded_weight)
+    +           weight_loader(param, local_loaded_weight.to(dtype=param.dtype))
             loaded_params.add(name)
         unloaded_params = params_dict.keys() - loaded_params
         if unloaded_params:

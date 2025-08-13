@@ -1,9 +1,11 @@
 Extend to other RL(HF) algorithms
 =================================
 
+Last updated: 02/25/2025.
+
 We already implemented the complete training pipeline of the PPO
 algorithms. To extend to other algorithms, we analyze the high-level
-principle to use veRL and provide a tutorial to implement the DPO
+principle to use verl and provide a tutorial to implement the DPO
 algorithm. Users can follow the similar paradigm to extend to other RL algorithms.
 
 .. note:: **Key ideas**: Single process drives multi-process computation and data communication.
@@ -26,7 +28,7 @@ Step 3: Utilize the encapsulated APIs to implement the control flow
 Example: Online DPO
 -------------------
 
-We use veRL to implement a simple online DPO algorithm. The algorithm
+We use verl to implement a simple online DPO algorithm. The algorithm
 flow of Online DPO is as follows:
 
 1. There is a prompt (rollout) generator which has the same weight as
@@ -47,8 +49,8 @@ Implementation details:
 
 .. code:: python
 
-   from single_controller.base import Worker
-   from single_controller.ray import RayWorkerGroup, RayClassWithInitArgs, RayResourcePool
+   from verl.single_controller.base import Worker
+   from verl.single_controller.ray import RayWorkerGroup, RayClassWithInitArgs, RayResourcePool
    import ray
 
    @ray.remote
@@ -66,7 +68,7 @@ Here, ``SampleGenerator`` can be viewed as a multi-process pulled up by
 the control flow to call. The implementation details inside can use any
 inference engine including vllm, sglang and huggingface. Users can
 largely reuse the code in
-verl/verl/trainer/ppo/rollout/vllm_rollout/vllm_rollout.py and we won’t
+verl/verl/workers/rollout/vllm_rollout/vllm_rollout.py and we won't
 go into details here.
 
 **ReferencePolicy inference**
@@ -75,7 +77,7 @@ API: compute reference log probability
 
 .. code:: python
 
-   from single_controller.base import Worker
+   from verl.single_controller.base import Worker
    import ray
 
    @ray.remote
@@ -93,7 +95,7 @@ API: Update actor model parameters
 
 .. code:: python
 
-   from single_controller.base import Worker
+   from verl.single_controller.base import Worker
    import ray
 
    @ray.remote
@@ -178,13 +180,13 @@ steps:
    and merge them.
 
 Frequently calling these 3 steps on the controller process greatly hurts
-code readability. **In veRL, we have abstracted and encapsulated these 3
-steps, so that the worker’s method + dispatch + collect can be
+code readability. **In verl, we have abstracted and encapsulated these 3
+steps, so that the worker's method + dispatch + collect can be
 registered into the worker_group**
 
 .. code:: python
 
-   from single_controller.base.decorator import register
+   from verl.single_controller.base.decorator import register
 
    def dispatch_data(worker_group, data):
        return data.chunk(worker_group.world_size)
@@ -214,11 +216,11 @@ computation, and data collection.
 
 Furthermore, the model parallelism size of each model is usually fixed,
 including dp, tp, pp. So for these common distributed scenarios, we have
-pre-implemented specific dispatch and collect methods,in `decorator.py <https://github.com/volcengine/verl/blob/main/single_controller/base/decorator.py>`_, which can be directly used to wrap the computations.
+pre-implemented specific dispatch and collect methods,in `decorator.py <https://github.com/volcengine/verl/blob/main/verl/single_controller/base/decorator.py>`_, which can be directly used to wrap the computations.
 
 .. code:: python
 
-   from single_controller.base.decorator import register, Dispatch
+   from verl.single_controller.base.decorator import register, Dispatch
 
    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
    def generate_sequences(self, data: DataProto) -> DataProto:
@@ -230,7 +232,7 @@ Here it requires the data interface to be ``DataProto``. Definition of
 Step 3: Main training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-With the above training flows, we can implement the algorithm’s control
+With the above training flows, we can implement the algorithm's control
 flow. It is recommended that ``main_task`` is also a ray remote process.
 
 .. code:: python

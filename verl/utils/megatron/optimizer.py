@@ -13,80 +13,96 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from apex.optimizers import FusedAdam as Adam
-from apex.optimizers import FusedSGD as SGD
-from megatron.optimizer.distrib_optimizer import DistributedOptimizer
-from megatron.optimizer.grad_scaler import ConstantGradScaler, DynamicGradScaler
-from megatron.optimizer import Float16OptimizerWithFloat16Params, FP32Optimizer
-from megatron.optimizer import get_param_groups
+import torch
+from megatron.core.optimizer import OptimizerConfig
+from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
+from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
-from verl.utils.megatron.optimizer_config import OptimizerConfig
+from verl.utils.logger import print_rank_0
+
+
+def init_megatron_optim_config(optim_config: dict) -> OptimizerConfig:
+    optim_args = {
+        "optimizer": optim_config.get("optimizer", "adam"),
+        "lr": optim_config.get("lr"),
+        "min_lr": optim_config.get("min_lr", None),
+        "clip_grad": optim_config.get("clip_grad", 1.0),
+        "weight_decay": optim_config.get("weight_decay", 0.01),
+        "bf16": True,
+        "params_dtype": torch.bfloat16,
+        "use_distributed_optimizer": True,
+    }
+
+    override_config = optim_config.get("override_optimizer_config", {})
+    if override_config:
+        for k, v in override_config.items():
+            optim_args[k] = v
+
+    print_rank_0(f"optimizer config after override: {optim_args}")
+
+    config = OptimizerConfig(**optim_args)
+    return config
 
 
 def get_megatron_optimizer(
-        model,
-        config: OptimizerConfig,
-        no_weight_decay_cond=None,
-        scale_lr_cond=None,
-        lr_mult=1.0,
-        check_for_nan_in_loss_and_grad=False,
-        overlap_param_gather=False  # add for verl
+    model,
+    config: OptimizerConfig,
+    no_weight_decay_cond=None,
+    scale_lr_cond=None,
+    lr_mult=1.0,
 ):
     # Base optimizer.
-    param_groups = get_param_groups(model, no_weight_decay_cond, scale_lr_cond, lr_mult)
+    return get_megatron_optimizer_native(
+        config=config,
+        model_chunks=model,
+        no_weight_decay_cond=no_weight_decay_cond,
+        scale_lr_cond=scale_lr_cond,
+        lr_mult=lr_mult,
+    )
 
-    if config.optimizer == 'adam':
-        optimizer = Adam(param_groups,
-                         lr=config.lr,
-                         weight_decay=config.weight_decay,
-                         betas=(config.adam_beta1, config.adam_beta2),
-                         eps=config.adam_eps)
-    elif config.optimizer == 'sgd':
-        optimizer = SGD(param_groups, lr=config.lr, weight_decay=config.weight_decay, momentum=config.sgd_momentum)
-    else:
-        raise Exception('{} optimizer is not supported.'.format(config.optimizer))
 
-    # Determine whether the params have main-grad field.
-    params_have_main_grad = True
+def get_megatron_optimizer_param_scheduler(
+    optimizer,
+    config,
+):
+    """
+    Get the optimizer parameter scheduler for Megatron.
+    """
+    lr_decay_steps = config.lr_decay_steps
+    lr_warmup_steps = config.lr_warmup_steps
+    if config.get("lr_decay_steps", None) is None:
+        lr_decay_steps = config.total_training_steps
+    wsd_decay_steps = None
+    if config.get("lr_wsd_decay_steps", None) is not None:
+        wsd_decay_steps = config.lr_wsd_decay_steps
+    if config.get("lr_warmup_steps_ratio", None) is not None and (
+        config.get("lr_warmup_steps", None) is None or config.lr_warmup_steps <= 0
+    ):
+        lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
-    # Mixed precision optimizer.
-    # - Note: both the Float16Optimizer and the DistributedOptimizer inherit
-    #   from the MixedPrecisionOptimizer, which manages any optimizer where
-    #   the model params and main params are distinct.
-    if config.fp16 or config.bf16 or config.use_distributed_optimizer:
+    opt_param_scheduler = OptimizerParamScheduler(
+        optimizer,
+        init_lr=config.lr_warmup_init,
+        max_lr=config.lr,
+        min_lr=config.min_lr,
+        lr_warmup_steps=lr_warmup_steps,
+        lr_decay_steps=lr_decay_steps,
+        lr_decay_style=config.lr_decay_style,
+        start_wd=config.weight_decay,
+        end_wd=config.weight_decay,
+        wd_incr_steps=config.total_training_steps,
+        wd_incr_style=config.weight_decay_incr_style,
+        use_checkpoint_opt_param_scheduler=config.use_checkpoint_opt_param_scheduler,
+        override_opt_param_scheduler=(not config.use_checkpoint_opt_param_scheduler),
+        wsd_decay_steps=wsd_decay_steps,
+        lr_wsd_decay_style=config.lr_wsd_decay_style,
+    )
 
-        # Grad scaler:
-        #    if loss-scale is provided, instantiate the constant scaler.
-        #    if we are using fp16 and loss-scale is not present, use a
-        #       dynamic scaler.
-        #    otherwise we are running in bf16 with no loss-scale so
-        #       leave it as None.
-        grad_scaler = None
+    return opt_param_scheduler
 
-        # Constant loss scale.
-        if config.loss_scale:
-            grad_scaler = ConstantGradScaler(config.loss_scale)
 
-        # Dynamic loss scale.
-        else:
-            if config.fp16:
-                grad_scaler = DynamicGradScaler(initial_scale=config.initial_loss_scale,
-                                                min_scale=config.min_loss_scale,
-                                                growth_factor=2.0,
-                                                backoff_factor=0.5,
-                                                growth_interval=config.loss_scale_window,
-                                                hysteresis=config.hysteresis)
-
-        # Megatron optimizer.
-        if config.use_distributed_optimizer:
-            return DistributedOptimizer(optimizer, config.clip_grad, config.log_num_zeros_in_grad,
-                                        check_for_nan_in_loss_and_grad, params_have_main_grad, config.fp16, config.bf16,
-                                        config.params_dtype, grad_scaler, model, overlap_param_gather)
-        else:
-            return Float16OptimizerWithFloat16Params(optimizer, config.clip_grad, config.log_num_zeros_in_grad,
-                                                     check_for_nan_in_loss_and_grad, params_have_main_grad, config.fp16,
-                                                     config.bf16, config.params_dtype, grad_scaler, model)
-
-    # FP32.
-    return FP32Optimizer(optimizer, config.clip_grad, config.log_num_zeros_in_grad, check_for_nan_in_loss_and_grad,
-                         params_have_main_grad, model)
+def get_megatron_last_lr(optimizer):
+    """
+    Get the last learning rate from the optimizer parameter scheduler.
+    """
+    return optimizer.param_groups[0]["lr"]

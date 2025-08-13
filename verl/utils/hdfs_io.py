@@ -12,17 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 import shutil
-import subprocess
-import logging
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv('VERL_SFT_LOGGING_LEVEL', 'WARN'))
+logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
 
 _HDFS_PREFIX = "hdfs://"
 
-_HDFS_BIN_PATH = shutil.which('hdfs')
+_HDFS_BIN_PATH = shutil.which("hdfs")
 
 
 def exists(path: str, **kwargs) -> bool:
@@ -42,7 +41,7 @@ def exists(path: str, **kwargs) -> bool:
 
 
 def _exists(file_path: str):
-    """ hdfs capable to check whether a file_path is exists """
+    """hdfs capable to check whether a file_path is exists"""
     if file_path.startswith("hdfs"):
         return _run_cmd(_hdfs_cmd(f"-test -e {file_path}")) == 0
     return os.path.exists(file_path)
@@ -83,7 +82,7 @@ def _mkdir(file_path: str) -> bool:
 
 
 def copy(src: str, dst: str, **kwargs) -> bool:
-    r"""Works like shutil.copy() but supports hdfs.
+    r"""Works like shutil.copy() for file, and shutil.copytree for dir, and supports hdfs.
 
     Copy data and mode bits ("cp src dst"). Return the file's destination.
     The destination may be a directory.
@@ -105,7 +104,10 @@ def copy(src: str, dst: str, **kwargs) -> bool:
         # - return file destination for hdfs files
         return _copy(src, dst)
     else:
-        return shutil.copy(src, dst)
+        if os.path.isdir(src):
+            return shutil.copytree(src, dst, **kwargs)
+        else:
+            return shutil.copy(src, dst, **kwargs)
 
 
 def _copy(from_path: str, to_path: str, timeout: int = None) -> bool:
@@ -116,8 +118,13 @@ def _copy(from_path: str, to_path: str, timeout: int = None) -> bool:
             returncode = _run_cmd(_hdfs_cmd(f"-put -f {from_path} {to_path}"), timeout=timeout)
     else:
         if from_path.startswith("hdfs"):
-            returncode = _run_cmd(_hdfs_cmd(f"-get \
-                {from_path} {to_path}"), timeout=timeout)
+            returncode = _run_cmd(
+                _hdfs_cmd(
+                    f"-get \
+                {from_path} {to_path}"
+                ),
+                timeout=timeout,
+            )
         else:
             try:
                 shutil.copy(from_path, to_path)

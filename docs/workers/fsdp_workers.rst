@@ -1,10 +1,12 @@
 PyTorch FSDP Backend
-============
+======================
+
+Last updated: 02/12/2025.
 
 We support PyTorch FSDP Backend by implementing various workers for
 actor, critic, reference, rollout and reward models. We also implement
 the ``FSDPVLLMShardingManager`` that reshard weight between FSDP and
-vLLM in `fsdp_vllm.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/hybrid_engine/fsdp_vllm.py>`_.
+vLLM in `fsdp_vllm.py <https://github.com/volcengine/verl/blob/main/verl/workers/sharding_manager/fsdp_vllm.py>`_.
 
 **Pros**
 
@@ -28,7 +30,7 @@ Due to the simplicity, we recommend using FSDP backend for algorithm
 research and prototyping.
 
 FSDP Workers
-------------
+--------------
 
 ActorRolloutRefWorker
 ^^^^^^^^^^^^^^^^^^^^^
@@ -59,7 +61,7 @@ highlighted below:
 3. ``FSDPVLLMShardingManager`` a context manager to perform actual
    resharding between actor and rollout.
 
-See `source code <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/workers/fsdp_workers.py#L42>`_. for more information.
+See `source code <https://github.com/volcengine/verl/blob/main/verl/workers/fsdp_workers.py>`_. for more information.
 
 1. Generate sequence and recompute log prob
 
@@ -73,7 +75,7 @@ See `source code <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/
 
 - In this function, the rollout model will perform auto-regressive
   generation and the actor model will recompute the old log prob for the
-  generetad response.
+  generated response.
 
 3. Update actor model
 
@@ -137,6 +139,6 @@ additional initialization for the Optimizer.
 HybridShard
 ------------
 
-We didn’t support FSDP `HybridShard`. To support this, we may need to
+We didn't support FSDP `HybridShard`. To support this, we may need to
 construct a 2D device mesh and test the corresponding
 ``dtensor_weight_loader`` and ``hf_weight_loader`` for each model.
