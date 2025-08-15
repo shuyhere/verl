@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=qwen3_4b_rloo
 #SBATCH --gres=gpu:a100:4
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=256G
 #SBATCH --time=24:00:00
 #SBATCH --output=test_log/qwen3_4b_rloo_%j.out
 #SBATCH --error=test_log/qwen3_4b_rloo_%j.err
@@ -39,12 +39,11 @@ python3 -m verl.trainer.main_ppo \
   data.val_files=\$PARQUET_VAL \
   data.train_batch_size=16 \
   data.max_prompt_length=1024 \
-  data.max_response_length=16384 \
+  data.max_response_length=8192 \
   data.filter_overlong_prompts=True \
   data.truncation='error' \
   data.shuffle=False \
-  actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
-  actor_rollout_ref.actor.ulysses_sequence_parallel_size=4 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
   actor_rollout_ref.actor.fsdp_config.param_offload=True \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
   actor_rollout_ref.model.path=Qwen/Qwen3-4B \
@@ -59,11 +58,10 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.rollout.name=sglang \
   actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
-  actor_rollout_ref.rollout.n=8 \
+  actor_rollout_ref.rollout.n=4 \
   actor_rollout_ref.rollout.load_format=safetensors \
   actor_rollout_ref.rollout.layered_summon=True \
-  actor_rollout_ref.rollout.val_kwargs.top_p=0.6 \
-  actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
+  actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
   actor_rollout_ref.rollout.val_kwargs.n=4 \
   actor_rollout_ref.ref.fsdp_config.param_offload=True \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
@@ -83,7 +81,7 @@ python3 -m verl.trainer.main_ppo \
   reward_model.reward_manager=batch \
   +reward_model.reward_kwargs.tokenizer_name=Qwen/Qwen3-4B \
   +reward_model.reward_kwargs.alpha=0.1 \
-  +reward_model.reward_kwargs.check_eos=False \
+  +reward_model.reward_kwargs.check_eos=True \
   custom_reward_function.path=\$PROJECT_DIR/verl/recipe/efficient_reasoning/reward_function.py \
   custom_reward_function.name=compute_score_batch
 "

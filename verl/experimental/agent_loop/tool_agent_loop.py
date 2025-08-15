@@ -222,61 +222,69 @@ class ToolAgentLoop(AgentLoopBase):
         )
         return output
 
-    async def _call_tool(self, tool_call: FunctionCall, tools_kwargs: dict[str, Any]) -> ToolResponse:
-        """Call tool and return tool response."""
-        tool, instance_id = None, None        
+    async def _call_tool(self, tool_call: FunctionCall) -> ToolResponse:
+        """Call a tool and normalize the result into a ToolResponse."""
+        tool, instance_id = None, None
         try:
             tool_name = tool_call.name
             tool_args = json.loads(tool_call.arguments)
             tool = self.tools[tool_name]
+
+            # Derive optional create/execute kwargs from current kwargs
             create_kwargs = {}
-            if hasattr(self, 'current_kwargs') and 'tools_kwargs' in self.current_kwargs:
-                tools_kwargs = self.current_kwargs['tools_kwargs']
-                tool_kwargs = tools_kwargs.get(tool_name, {})
-                create_kwargs = tool_kwargs.get('create_kwargs', {})
-                
+            execute_kwargs = {}
+            try:
+                base_kwargs = (self.current_kwargs or {})
+                tools_kwargs = (
+                    base_kwargs.get("tools_kwargs")
+                    or (base_kwargs.get("extra_info", {}) or {}).get("tools_kwargs")
+                    or {}
+                )
+                tool_kwargs = tools_kwargs.get(tool_name, {}) if isinstance(tools_kwargs, dict) else {}
+                create_kwargs = tool_kwargs.get("create_kwargs", {}) or {}
+                execute_kwargs = tool_kwargs.get("execute_kwargs", {}) or {}
+            except Exception:
+                create_kwargs = {}
+                execute_kwargs = {}
+
             instance_id = await tool.create(**create_kwargs)
-            tool_response, _, _ = await tool.execute(instance_id, tool_args)
+
+            # Execute tool; normalize diverse return types
+            exec_result = await tool.execute(instance_id, tool_args, **execute_kwargs)
+            # Common convention in this repo: (text, reward, metrics)
+            tool_text = None
+            if isinstance(exec_result, tuple) and len(exec_result) >= 1:
+                tool_text = exec_result[0]
+            else:
+                tool_text = exec_result  # could already be a str or ToolResponse
+
+            # If tool returned a ToolResponse directly, honor it
+            if isinstance(tool_text, ToolResponse):
+                response = tool_text
+            elif isinstance(tool_text, dict) and ("text" in tool_text or "image" in tool_text or "video" in tool_text):
+                response = ToolResponse(**tool_text)
+            else:
+                # Fallback to string conversion
+                response_text = "" if tool_text is None else str(tool_text)
+
+                # Truncate long responses
+                if self.max_tool_response_length and len(response_text) > self.max_tool_response_length:
+                    if self.tool_response_truncate_side == "left":
+                        response_text = response_text[: self.max_tool_response_length] + "...(truncated)"
+                    elif self.tool_response_truncate_side == "right":
+                        response_text = "(truncated)..." + response_text[-self.max_tool_response_length :]
+                    else:
+                        half = self.max_tool_response_length // 2
+                        response_text = response_text[:half] + "...(truncated)..." + response_text[-half:]
+                response = ToolResponse(text=response_text)
+
+            return response
         except Exception as e:
             logger.warning(f"Error when executing tool: {e}")
-            return ToolResponse(
-                text=f"Error when executing tool: {e}",
-            )
+            return ToolResponse(text=f"Error when executing tool: {e}")
         finally:
             if tool and instance_id:
-                await tool.release(instance_id)
-            
-            # TODO: append malformed tool_call to the prompt: invalid function name or arguments
-        #     tool_name = tool_call.name
-        #     tool_args = json.loads(tool_call.arguments)
-        #     tool = self.tools[tool_name]
-
-        #     instance_id = await tool.create()
-        #     tool_response, _, _ = await tool.execute(instance_id, tool_args)
-        # except Exception as e:
-        #     logger.exception(f"Error when executing tool: {e}")
-        #     return e
-        # finally:
-        #     if tool and instance_id:
-        #         await tool.release(instance_id)
-
-        if len(tool_response) > self.max_tool_response_length:
-            if self.tool_response_truncate_side == "left":
-                tool_response = tool_response[: self.max_tool_response_length] + "...(truncated)"
-            elif self.tool_response_truncate_side == "right":
-                tool_response = "(truncated)..." + tool_response[-self.max_tool_response_length :]
-            else:
-                length = self.max_tool_response_length // 2
-                tool_response = tool_response[:length] + "...(truncated)..." + tool_response[-length:]
-
-        # Create ToolResponse from tool execution result
-        tool_response_kwargs = {"text": tool_response_text}
-
-        # Add multimedia data if present
-        for attr_name in ["image", "video"]:
-            if hasattr(tool_execution_response, attr_name):
-                attr_value = getattr(tool_execution_response, attr_name)
-                if attr_value is not None:
-                    tool_response_kwargs[attr_name] = attr_value
-
-        return ToolResponse(**tool_response_kwargs)
+                try:
+                    await tool.release(instance_id)
+                except Exception:
+                    pass

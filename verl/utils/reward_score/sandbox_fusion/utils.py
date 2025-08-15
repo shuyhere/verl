@@ -272,7 +272,7 @@ def _execute_user_function():
     _args = []
     if _raw_input_str.strip(): # If there's input
         # Parse input intelligently based on structure
-        lines = _raw_input_str.strip().split('\n')
+        lines = _raw_input_str.strip().split('\\n')
         
         if len(lines) >= 2 and lines[0].strip().isdigit():
             # Looks like: n followed by n lines of data
@@ -375,25 +375,23 @@ def _execute_user_function():
 if __name__ == '__main__':
     _result, _error_occurred = _execute_user_function()
 
-    if not _error_occurred:
-        # Serialize result to stdout
-        if isinstance(_result, (dict, list, tuple)) or _result is None or isinstance(_result, bool):
+    if not _error_occurred and _result is not None:
+        # Serialize non-None result to stdout
+        if isinstance(_result, (dict, list, tuple)) or isinstance(_result, bool):
             print(json.dumps(_result))
         elif isinstance(_result, (int, float, str)):
-            print(str(_result)) # Ensure string conversion for print
+            print(str(_result))  # Ensure string conversion for print
         else:
             # For other types, default to string representation.
             print(str(_result))
-    # Optional: To explicitly exit with an error code if the sandbox relies on it
-    # else:
-    #    sys.exit(1)
+    # If result is None, assume the user code already printed to stdout; do not print 'null'.
 """
         current_generation_code = wrapper_code
     else:
         # If no function name found or not Python, use original code
         current_generation_code = generation
     
-    print("===stdin_data===", stdin_data)
+    # stdin debug print removed
     stdin = None if stdin_data is None else str(stdin_data)
     try:
         if concurrent_semaphore:
@@ -578,7 +576,6 @@ def check_correctness(
         metadata_list: A list containing metadata dictionaries for each test case,
                        ordered corresponding to the inputs.
     """
-    print("=== ENTERING check_correctness function ===")
     logger.info("Starting correctness check for generation.")
     # import ipdb; ipdb.set_trace()
 
@@ -590,7 +587,7 @@ def check_correctness(
     expected_outputs = in_outs["outputs"]
     fn_name = in_outs.get("fn_name")
     num_cases = len(inputs)
-    print(f"=== check_correctness: num_cases = {num_cases}, inputs = {inputs[:3]}... ===")  
+    
     
     assert_cases = in_outs.get("assert_case", [""] * num_cases)  # Default to empty strings if not provided
     results = [None] * num_cases  # Initialize with placeholders
@@ -615,12 +612,11 @@ def check_correctness(
     first_compile_error_index = -1
 
     # max_workers is limited by sandbox_fusion_max_concurrent from concurrent_semaphore
-    print("=== REACHED LINE 525: About to create ThreadPoolExecutor ===")
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(32, os.cpu_count() * 5)) as executor:
         # Submit all tasks, passing the concurrent_semaphore to _process_single_case
         future_to_index = {}
         for i, stdin_data in enumerate(inputs):
-            print(f"=== Submitting case {i}: stdin_data = {repr(stdin_data)} ===")
             future = executor.submit(
                 _process_single_case,
                 i,

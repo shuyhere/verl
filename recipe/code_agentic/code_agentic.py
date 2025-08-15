@@ -277,9 +277,7 @@ class SandboxFusionTestCaseTool(SandboxFusionTool):
             }
 
             output_lines = []
-            output_lines.append("Output:")
-            output_lines.append(run_text)
-            output_lines.append(f"\nTest Case Evaluation:")
+            output_lines.append(f"Test Case Evaluation:")
             output_lines.append(f"Score: {score:.3f}")
             output_lines.append(f"Tests Passed: {passed_test_cases}/{total_test_cases}")
             output_lines.append(f"Failed Tests: {failed_test_cases}")
@@ -659,4 +657,4 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
             },
         },
     }
-    return result
+    return float(final_score)
