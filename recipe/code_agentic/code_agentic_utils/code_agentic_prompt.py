@@ -17,7 +17,7 @@ def get_code_problem_prompt(question: str) -> str:
 		<tool_call>
 		{{"name": "code_interpreter", "arguments": {{"code": "your DEBUG code here"}}}}
 		</tool_call>
-
+        Before you are sure about your code to submit. 
 		""".format(question=question)
     return prompt_content
 
@@ -29,7 +29,7 @@ def get_answer_format() -> str:
     Returns:
         Answer format description
     """
-    return """\nThe final code solution format must be a COMPLETE python function start with def and a return value inside <code>your FINAL code here</code>, for example:
+    return """\nIf you are sure about your code to submit, the final code solution format must be a COMPLETE python function start with def and a return value inside <code>your FINAL code here</code>, for example:
     <code>
     def solution(input_data):
         return "your return value here"

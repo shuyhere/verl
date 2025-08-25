@@ -134,7 +134,7 @@ class SandboxFusionTool(BaseTool):
         # TODO: better documentation for the config
         self.num_workers = config.get("num_workers", 10)
         self.rate_limit = config.get("rate_limit", 10)
-        self.default_timeout = config.get("default_timeout", 30)
+        self.default_timeout = config.get("default_timeout", 120)  # Increased from 30 to 120 seconds
         self.default_language = config.get("default_language", "python")
         self.enable_global_rate_limit = config.get("enable_global_rate_limit", True)
         self.execution_pool = init_execution_pool(
@@ -144,7 +144,8 @@ class SandboxFusionTool(BaseTool):
             mode=PoolMode.ThreadMode,
         )
         self.sandbox_fusion_url = config.get("sandbox_fusion_url", "")
-        self.memory_limit_mb = config.get("memory_limit_mb", 1024)
+        # Accept both memory_limit_mb and legacy memory_limit_MB
+        self.memory_limit_mb = config.get("memory_limit_mb", config.get("memory_limit_MB", 1024))
         if self.sandbox_fusion_url == "":
             raise ValueError("sandbox_fusion_url is not set")
         log_msg = f"Init SandboxFusionTool with config: {config}"
@@ -177,7 +178,7 @@ class SandboxFusionTool(BaseTool):
         # sandbox has no score or metrics, use Nones
         return ToolResponse(text=result), None, None
 
-    def execute_code(self, instance_id, code, timeout=30, language="python"):
+    def execute_code(self, instance_id, code, timeout=120, language="python"):  # Increased from 30 to 120 seconds
         result_status, metadata = _process_single_case(
             0, None, None, self.sandbox_fusion_url, code, timeout, self.memory_limit_mb, language
         )

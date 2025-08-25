@@ -24,9 +24,9 @@ from typing import Any, Optional
 import requests
 
 DEFAULT_TIMEOUT = 10  # Default compile and run timeout
-MAX_RETRIES = 3
-INITIAL_RETRY_DELAY = 1
-API_TIMEOUT = 10
+MAX_RETRIES = 5  # Increased from 3 to 5 for better resilience
+INITIAL_RETRY_DELAY = 2  # Increased from 1 to 2 seconds
+API_TIMEOUT = 60  # Increased from 10 to 60 seconds for better reliability
 
 logger = logging.getLogger(__name__)
 
@@ -113,19 +113,24 @@ def call_sandbox_api(
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     # Calculate a reasonable request timeout based on compile/run timeouts plus a buffer
     request_timeout = compile_timeout + run_timeout + API_TIMEOUT
+    
+    # Set both connect and read timeout for better reliability
+    # connect_timeout: time to establish connection
+    # read_timeout: time to read response
+    timeout_config = (30, request_timeout)  # (connect_timeout, read_timeout)
 
     last_error = None  # Store the last error encountered
 
     for attempt in range(MAX_RETRIES):
         try:
             logger.info(
-                f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling sandbox API at {sandbox_fusion_url}"
+                f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling sandbox API at {sandbox_fusion_url} with timeout {timeout_config}"
             )  # <-- Use internal log_prefix
             response = requests.post(
                 sandbox_fusion_url,
                 headers=headers,
                 data=payload,
-                timeout=request_timeout,  # Use the calculated timeout
+                timeout=timeout_config,  # Use tuple timeout for connect and read
             )
 
             # Check for Gateway Timeout (504) specifically for retrying

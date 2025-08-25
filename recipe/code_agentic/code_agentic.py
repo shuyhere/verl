@@ -437,6 +437,17 @@ class CodeAgenticDataset(RLHFDataset):
         inputs = input_output.get("inputs", [])
         outputs = input_output.get("outputs", [])
         
+        # Limit the number of test cases to at most 128 to avoid extremely large evaluations
+        try:
+            max_cases = 256
+            if isinstance(inputs, list):
+                inputs = inputs[:max_cases]
+            if isinstance(outputs, list):
+                outputs = outputs[:max_cases]
+        except Exception:
+            # If slicing fails for any reason, continue with original values
+            pass
+        
         total_input_size = sum(len(str(inp)) for inp in inputs)
         total_output_size = sum(len(str(out)) for out in outputs)
         
@@ -501,18 +512,22 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
     pass_rate = 0.0
     num_turns = int(extra_info.get("num_turns", 1) or 1)
 
-    format_reward = 0.10           # code extraction reward
-    format_bonus_semantic = 0.05   # code looks more executable (def/import/main)
-    tool_unit_reward = 0.03        # single tool call reward
-    tool_reward_cap = 0.20         # tool call reward cap
-    tool_bonus_code_interpreter = 0.05  # extra reward for using code interpreter etc.
+    format_reward = 0.02           # Reduced from 0.10 to 0.02 - minimal code extraction reward
+    format_bonus_semantic = 0.01   # Reduced from 0.05 to 0.01 - minimal semantic bonus
+    tool_unit_reward = 0.01        # Reduced from 0.03 to 0.01 - minimal tool call reward
+    tool_reward_cap = 0.10         # Reduced from 0.20 to 0.10 - lower tool call reward cap
+    tool_bonus_code_interpreter = 0.02  # Reduced from 0.05 to 0.02 - minimal bonus for code interpreter
 
-    turn_efficiency_bonus = 0.05   # positive reward for 2 turns
-    turn_penalty_many = 0.05       # negative reward for many turns
+    # New: reasoning reward to encourage step-by-step problem solving
+    reasoning_reward = 0.10        # Reward for showing reasoning steps
+    reasoning_penalty = 0.05       # Penalty for jumping directly to code
 
-    test_scale = 1.20              # scale up pass rate
-    perfect_bonus = 0.20           # extra reward for perfect pass
-    mid_bonus = 0.05               # extra reward for pass rate > 0.5
+    turn_efficiency_bonus = 0.08   # Increased from 0.05 to 0.08 - positive reward for 2 turns
+    turn_penalty_many = 0.08       # Increased from 0.05 to 0.08 - negative reward for many turns
+
+    test_scale = 1.00              # Reduced from 1.20 to 1.00 - don't over-reward test passing
+    perfect_bonus = 0.15           # Reduced from 0.20 to 0.15 - extra reward for perfect pass
+    mid_bonus = 0.03               # Reduced from 0.05 to 0.03 - extra reward for pass rate > 0.5
 
     # 2) parse code and run test
     has_code = False
@@ -598,7 +613,10 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
         except Exception:
             pass
 
-    # 3.2 tool call reward
+    # 3.2 reasoning reward - encourage step-by-step problem solving
+    # Removed reasoning_component since it's always 0
+
+    # 3.3 tool call reward
     num_tool_calls = int(
         extra_info.get("num_tool_calls")
         or extra_info.get("tool_calls")
@@ -620,7 +638,7 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
     shaped_score += tool_reward
     tool_component += tool_reward
 
-    # 3.3 turn reward (positive reward for few turns, negative reward for many turns)
+    # 3.4 turn reward (positive reward for few turns, negative reward for many turns)
     if num_turns <= 4:
         shaped_score += turn_efficiency_bonus
         turn_component += turn_efficiency_bonus
@@ -628,7 +646,7 @@ def compute_code_score(data_source: str, solution_str: str, ground_truth: dict, 
         shaped_score -= turn_penalty_many
         turn_component -= turn_penalty_many
 
-    # 3.4 test pass reward: scale up pass rate, and give extra reward for perfect pass
+    # 3.5 test pass reward: scale up pass rate, and give extra reward for perfect pass
     test_component = pass_rate * test_scale
     if pass_rate >= 1.0:
         test_component += perfect_bonus

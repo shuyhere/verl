@@ -5,7 +5,7 @@ tools:
       num_workers: 128
       enable_global_rate_limit: true
       rate_limit: 128
-      default_timeout: 30
+      default_timeout: 120  # Increased from 30 to 120 seconds for complex code
       default_language: "python"
       memory_limit_mb: 1024
       type: native
